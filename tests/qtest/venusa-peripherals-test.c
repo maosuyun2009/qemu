@@ -7,6 +7,9 @@
 #define ECLIC_PENDING(irq) (0xe0021000 + (irq) * 4)
 #define PSRAM_CTRL 0x44600000
 #define SD 0x44a00000
+#define USB 0x41000000
+#define USB_CLOCK 0x43100034
+#define USB_CTRL1 0x43100040
 
 static char *flash_path, *sd_path, *otp_path;
 
@@ -18,6 +21,251 @@ static QTestState *start(bool sd)
         "-drive if=none,id=sdcard,file=%s,format=raw", card) : g_strdup("");
     return qtest_initf("-machine venusa-rd-evb "
                        "-drive if=pflash,format=raw,file=%s %s", flash, drive);
+}
+
+/* The firmware's shared TX/RX FIFO layout consumes 3840 of 4096 bytes. */
+static void usb_empty_port(void)
+{
+    static const uint8_t sizes[] = { 3, 7, 7, 7, 6, 3, 3, 3 };
+    QTestState *q = start(false);
+    unsigned offset = 0;
+
+    qtest_writel(q, USB_CLOCK, 4);
+    uint32_t config = qtest_readl(q, USB_CTRL1);
+    qtest_writel(q, USB_CTRL1, config & ~(1u << 18));
+    qtest_writel(q, USB_CTRL1, (config & ~(1u << 18)) | (1u << 14));
+    g_assert_cmphex(qtest_readl(q, USB_CTRL1), ==, 1u << 14);
+    for (unsigned ep = 0; ep < 8; ep++) {
+        qtest_writeb(q, USB + 0x0e, ep);
+        qtest_writeb(q, USB + 0x62, sizes[ep]);
+        qtest_writew(q, USB + 0x64, offset / 8);
+        qtest_writeb(q, USB + 0x63, sizes[ep]);
+        qtest_writew(q, USB + 0x66, offset / 8);
+        offset += 8u << sizes[ep];
+    }
+    g_assert_cmpuint(offset, ==, 3840);
+    qtest_writeb(q, USB + 0x0b, 0xff);
+    qtest_writew(q, USB + 0x06, 1);
+    qtest_writew(q, USB + 0x08, 0);
+    qtest_writeb(q, USB + 0x01, qtest_readb(q, USB + 0x01) | 0x20);
+    qtest_writeb(q, USB + 0x60, qtest_readb(q, USB + 0x60) | 1);
+    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 5);
+    g_assert_cmphex(qtest_readb(q, USB + 0x01), ==, 0x20);
+    g_assert_cmphex(qtest_readb(q, USB + 0x0b), ==, 0xff);
+    g_assert_cmphex(qtest_readw(q, USB + 0x06), ==, 1);
+    g_assert_cmphex(qtest_readw(q, USB + 0x08), ==, 0);
+    offset = 0;
+    for (unsigned ep = 0; ep < 8; ep++) {
+        qtest_writeb(q, USB + 0x0e, ep);
+        g_assert_cmpuint(qtest_readb(q, USB + 0x0e), ==, ep);
+        g_assert_cmpuint(qtest_readb(q, USB + 0x62), ==, sizes[ep]);
+        g_assert_cmpuint(qtest_readb(q, USB + 0x63), ==, sizes[ep]);
+        g_assert_cmpuint(qtest_readw(q, USB + 0x64), ==, offset / 8);
+        g_assert_cmpuint(qtest_readw(q, USB + 0x66), ==, offset / 8);
+        offset += 8u << sizes[ep];
+    }
+    qtest_clock_step(q, 1000000000);
+    g_assert_cmphex(qtest_readw(q, USB + 0x02), ==, 0);
+    g_assert_cmphex(qtest_readw(q, USB + 0x04), ==, 0);
+    g_assert_cmphex(qtest_readb(q, USB + 0x0a), ==, 0);
+    g_assert_cmphex(qtest_readb(q, ECLIC_PENDING(56)) & 1, ==, 0);
+    /* Gating is not reset: configuration survives when the clock returns. */
+    qtest_writel(q, USB_CLOCK, 0);
+    qtest_clock_step(q, 1000000000);
+    qtest_writel(q, USB_CLOCK, 4);
+    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 5);
+    g_assert_cmpuint(qtest_readw(q, USB + 0x64), ==, 472);
+    qtest_writel(q, 0x43100014, 1u << 8);
+    g_assert_cmphex(qtest_readl(q, USB_CTRL1), ==, 1u << 14);
+    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 0);
+    g_assert_cmphex(qtest_readb(q, USB + 0x01), ==, 0);
+    g_assert_cmphex(qtest_readb(q, USB + 0x0b), ==, 0);
+    for (unsigned ep = 0; ep < 8; ep++) {
+        qtest_writeb(q, USB + 0x0e, ep);
+        g_assert_cmphex(qtest_readb(q, USB + 0x62), ==, 0);
+        g_assert_cmphex(qtest_readb(q, USB + 0x63), ==, 0);
+        g_assert_cmphex(qtest_readw(q, USB + 0x64), ==, 0);
+        g_assert_cmphex(qtest_readw(q, USB + 0x66), ==, 0);
+    }
+    qtest_system_reset(q);
+    g_assert_cmphex(qtest_readl(q, USB_CLOCK), ==, 0);
+    g_assert_cmphex(qtest_readl(q, USB_CTRL1), ==, 0);
+    qtest_writel(q, USB_CLOCK, 4);
+    g_assert_cmphex(qtest_readb(q, USB + 0x0e), ==, 0);
+    g_assert_cmphex(qtest_readb(q, ECLIC_PENDING(56)) & 1, ==, 0);
+    qtest_quit(q);
+}
+
+static void usb_configuration(void)
+{
+    QTestState *q = start(false);
+
+    qtest_writel(q, USB_CLOCK, 4);
+    qtest_writel(q, USB_CTRL1, (1u << 18) | (1u << 14));
+    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 0);
+    qtest_writel(q, USB_CTRL1, 1u << 14);
+    qtest_writeb(q, USB + 0x60, 1);
+    qtest_writeb(q, USB + 0x60, qtest_readb(q, USB + 0x60) & ~1);
+    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 0);
+    /* usb_reg.h: SUSPEND_MODE[1] and HSMODE[4] are status, not controls. */
+    qtest_writeb(q, USB + 0x01, 0x33);
+    g_assert_cmphex(qtest_readb(q, USB + 0x01), ==, 0x21);
+    qtest_writeb(q, USB + 0x01, 0x12);
+    g_assert_cmphex(qtest_readb(q, USB + 0x01), ==, 0);
+    qtest_writew(q, USB + 0x06, 0xff);
+    qtest_writew(q, USB + 0x08, 0xfe);
+    g_assert_cmphex(qtest_readw(q, USB + 0x06), ==, 0xff);
+    g_assert_cmphex(qtest_readw(q, USB + 0x08), ==, 0xfe);
+    /* Distinct directions in one bank, and exact 4 KiB allocation limits. */
+    qtest_writeb(q, USB + 0x62, 8);
+    qtest_writew(q, USB + 0x64, 256);
+    qtest_writeb(q, USB + 0x63, 0x18);
+    g_assert_cmphex(qtest_readb(q, USB + 0x62), ==, 8);
+    g_assert_cmphex(qtest_readb(q, USB + 0x63), ==, 0x18);
+    g_assert_cmphex(qtest_readw(q, USB + 0x64), ==, 256);
+    g_assert_cmphex(qtest_readw(q, USB + 0x66), ==, 0);
+    qtest_clock_step(q, 1000000000);
+    g_assert_cmphex(qtest_readw(q, USB + 0x02), ==, 0);
+    g_assert_cmphex(qtest_readw(q, USB + 0x04), ==, 0);
+    g_assert_cmphex(qtest_readb(q, USB + 0x0a), ==, 0);
+    g_assert_cmphex(qtest_readb(q, ECLIC_PENDING(56)) & 1, ==, 0);
+    qtest_quit(q);
+}
+
+static void usb_spi_reset_isolation(void)
+{
+    const uint32_t spi[] = { 0x43e00000, 0x43f00000 };
+    QTestState *q = start(false);
+
+    for (unsigned i = 0; i < 2; i++) {
+        qtest_writel(q, 0x4310001c + i * 4, 0x13800000);
+        qtest_writel(q, 0x4310001c + i * 4, 0x93800000);
+        qtest_writel(q, spi[i] + 0x10, 0x700);
+        qtest_writel(q, spi[i] + 0x40, i + 1);
+    }
+    qtest_writel(q, USB_CLOCK, 4);
+    qtest_writel(q, USB_CTRL1, 1u << 14);
+    qtest_writeb(q, USB + 0x60, 1);
+    qtest_writeb(q, USB + 0x01, 0x20);
+    qtest_writel(q, 0x43100014, 1u << 8);
+    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 0);
+    g_assert_cmphex(qtest_readb(q, USB + 0x01), ==, 0);
+    for (unsigned i = 0; i < 2; i++) {
+        g_assert_cmphex(qtest_readl(q, spi[i] + 0x10), ==, 0x700);
+        g_assert_cmphex(qtest_readl(q, spi[i] + 0x40), ==, i + 1);
+    }
+    qtest_writeb(q, USB + 0x60, 1);
+    qtest_writeb(q, USB + 0x01, 0x20);
+    qtest_writeb(q, USB + 0x0e, 3);
+    qtest_writeb(q, USB + 0x62, 3);
+    qtest_writew(q, USB + 0x64, 8);
+    for (unsigned i = 0; i < 2; i++) {
+        qtest_writel(q, 0x43100014, 1u << (3 + i));
+        g_assert_cmphex(qtest_readl(q, spi[i] + 0x10), ==, 0);
+        g_assert_cmphex(qtest_readl(q, spi[i] + 0x40), ==, 0);
+        g_assert_cmphex(qtest_readl(q, spi[1 - i] + 0x10), ==, 0x700);
+        g_assert_cmphex(qtest_readl(q, spi[1 - i] + 0x40), ==, 2 - i);
+        g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 5);
+        g_assert_cmphex(qtest_readb(q, USB + 0x01), ==, 0x20);
+        g_assert_cmphex(qtest_readb(q, USB + 0x0e), ==, 3);
+        g_assert_cmphex(qtest_readb(q, USB + 0x62), ==, 3);
+        g_assert_cmphex(qtest_readw(q, USB + 0x64), ==, 8);
+        g_assert_cmphex(qtest_readl(q, USB_CTRL1), ==, 1u << 14);
+        g_assert_cmphex(qtest_readb(q, ECLIC_PENDING(56)) & 1, ==, 0);
+        qtest_writel(q, spi[i] + 0x10, 0x700);
+        qtest_writel(q, spi[i] + 0x40, i + 1);
+    }
+    qtest_quit(q);
+}
+
+typedef struct USBRejected {
+    const char *name;
+    uint32_t address, value;
+    unsigned size;
+    bool read;
+} USBRejected;
+
+static const USBRejected usb_rejections[] = {
+    { "tx-ready", USB + 0x12, 2, 1 },
+    { "fifo", USB + 0x20, 0x12345678, 4 },
+    { "dma", USB + 0x204, 1, 4 },
+    { "unknown-read", USB, 0, 1, true },
+    { "wide-enable", USB + 0x06, 0, 4 },
+    { "narrow-enable", USB + 0x06, 0, 1 },
+    { "wide-power", USB + 0x01, 0, 2 },
+    { "power-resume", USB + 0x01, 4, 1 },
+    { "power-reset", USB + 0x01, 8, 1 },
+    { "power-softconn", USB + 0x01, 0x40, 1 },
+    { "power-isoupdate", USB + 0x01, 0x80, 1 },
+    { "power-all", USB + 0x01, 0xff, 1 },
+    { "qword", USB + 0x08, 0, 8 },
+    { "unaligned-address", USB + 0x65, 0, 2 },
+    { "index", USB + 0x0e, 8, 1 },
+    { "fifo-size", USB + 0x62, 10, 1 },
+    { "fifo-reserved", USB + 0x63, 0x20, 1 },
+    { "fifo-address", USB + 0x64, 512, 2 },
+    { "fifo-end", USB + 0x64, 257, 2 },
+    { "double-fifo", USB + 0x63, 0x19, 1 },
+    { "host-request", USB + 0x60, 2, 1 },
+    { "gated", USB + 0x60, 1, 1 },
+    { "device-session", USB + 0x60, 1, 1 },
+    { "utmi8-session", USB + 0x60, 1, 1 },
+    { "config-reserved", USB_CTRL1, 1u << 31, 4 },
+    { "config-bist", USB_CTRL1, 1u << 20, 4 },
+    { "active-iddig", USB_CTRL1, (1u << 18) | (1u << 14), 4 },
+    { "active-utmi8", USB_CTRL1, 0, 4 },
+    { "status-write", USB + 0x02, 0, 2 },
+    { "ir-reset", 0x43100014, 1u << 7, 4 },
+};
+
+static void usb_rejected(const void *opaque)
+{
+    const USBRejected *test = opaque;
+
+    if (g_test_subprocess()) {
+        QTestState *q = start(false);
+        qtest_set_expected_status(q, 1);
+        qtest_writel(q, USB_CLOCK, 4);
+        qtest_writel(q, USB_CTRL1, 1u << 14);
+        if (!strcmp(test->name, "gated")) {
+            qtest_writel(q, USB_CLOCK, 0);
+        } else if (!strcmp(test->name, "device-session")) {
+            qtest_writel(q, USB_CTRL1, (1u << 18) | (1u << 14));
+        } else if (!strcmp(test->name, "utmi8-session")) {
+            qtest_writel(q, USB_CTRL1, 0);
+        } else if (g_str_has_prefix(test->name, "active-")) {
+            qtest_writeb(q, USB + 0x60, 1);
+        } else if (!strcmp(test->name, "fifo-end")) {
+            qtest_writeb(q, USB + 0x62, 8);
+        }
+        if (test->read) {
+            qtest_readb(q, test->address);
+        } else if (test->size == 1) {
+            qtest_writeb(q, test->address, test->value);
+        } else if (test->size == 2) {
+            qtest_writew(q, test->address, test->value);
+        } else if (test->size == 4) {
+            qtest_writel(q, test->address, test->value);
+        } else {
+            qtest_writeq(q, test->address, test->value);
+        }
+        qtest_quit(q);
+        return;
+    }
+    g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_failed();
+    if (test->address == USB_CTRL1) {
+        g_test_trap_assert_stderr("*VenusA unsupported write*"
+                                 "address=0x43100040*");
+    } else if (test->address == 0x43100014) {
+        g_test_trap_assert_stderr("*VenusA unsupported write*"
+                                 "address=0x43100014*");
+    } else {
+        g_autofree char *message = g_strdup_printf(
+            "*ListenAI MUSB unsupported %s offset=0x%x size=%u*",
+            test->read ? "read" : "write", test->address - USB, test->size);
+        g_test_trap_assert_stderr(message);
+    }
 }
 
 static void systimer(void)
@@ -549,6 +797,14 @@ int main(int argc, char **argv)
     g_setenv("LISEM_QEMU_OTP_IMAGE", otp_path, true);
     qtest_add_func("venusa/cluster-interrupts", cluster_interrupts);
     qtest_add_func("venusa/nor-block-persistence", nor_block_persistence);
+    qtest_add_func("venusa/usb-empty-port", usb_empty_port);
+    qtest_add_func("venusa/usb-configuration", usb_configuration);
+    qtest_add_func("venusa/usb-spi-reset-isolation", usb_spi_reset_isolation);
+    for (unsigned i = 0; i < G_N_ELEMENTS(usb_rejections); i++) {
+        g_autofree char *name = g_strdup_printf("venusa/usb-reject/%s",
+                                               usb_rejections[i].name);
+        qtest_add_data_func(name, &usb_rejections[i], usb_rejected);
+    }
     qtest_add_func("venusa/systimer", systimer);
     qtest_add_func("venusa/psram", psram);
     qtest_add_func("venusa/sd-transfers", sd_transfers);

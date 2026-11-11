@@ -261,6 +261,22 @@ static RISCVException op_mnxti(CPURISCVState *env, int csr,
     return RISCV_EXCP_NONE;
 }
 
+static RISCVException op_scratch_swap(CPURISCVState *env, int csr,
+                                     target_ulong *value, target_ulong new_value,
+                                     target_ulong write_mask)
+{
+    if ((env->mtvec & 3) != 3 || env->priv != PRV_M ||
+        write_mask != (target_ulong)-1) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+    /* Nuclei ISA 16.5.21/22: CSRRW swaps only across privilege/level domains. */
+    bool swap = csr == 0x348 ? ((env->mcause >> 28) & 3) != PRV_M :
+        (((env->mcause >> 16) & 255) == 0) != (state(env)->level == 0);
+    if (value) { *value = swap ? env->mscratch : new_value; }
+    if (swap) { env->mscratch = new_value; }
+    return RISCV_EXCP_NONE;
+}
+
 static RISCVException read_custom(CPURISCVState *env, int csr, target_ulong *value)
 {
     NucleiN300State *s = state(env);
@@ -275,7 +291,9 @@ static RISCVException read_custom(CPURISCVState *env, int csr, target_ulong *val
     case 0xfc0: *value = 0x195; break;
     case 0xfc1: *value = 0x194; break;
     case 0x7f7: *value = 0xe0000027; break;
-    case 0x810: case 0x811: case 0x7c9:
+    case 0xbe0: case 0xbe1: case 0xbe2: case 0xbe3: case 0xbe4: case 0xbe5:
+        *value = s->mattri_high[csr - 0xbe0]; break;
+    case 0x810: case 0x811: case 0x7c9: case 0x4cf:
     case 0x7cc: case 0x7eb: case 0x7ee: case 0x7ef: *value = 0; break;
     default: *value = s->csrs[csr - 0x7c0]; break;
     }
@@ -299,6 +317,10 @@ static RISCVException write_custom(CPURISCVState *env, int csr, target_ulong val
     case 0x7cc:
         if (value > 31) { return RISCV_EXCP_ILLEGAL_INST; }
         break;
+    case 0x4cf:
+        /* CCM pipeline flush: QEMU's coherent accesses complete synchronously. */
+        if (value > 1) { return RISCV_EXCP_ILLEGAL_INST; }
+        break;
     case 0x7eb: case 0x7ee: case 0x7ef:
         cpu_stl_data_ra(env, env->gpr[2] + 4 * value,
                      csr == 0x7eb ? s->csrs[4] : csr == 0x7ee ? env->mcause : env->mepc, ra);
@@ -307,7 +329,10 @@ static RISCVException write_custom(CPURISCVState *env, int csr, target_ulong val
     /* Device and non-cacheable region attributes retain their architectural
      * state. Guest memory already uses coherent, uncached QEMU accesses. */
     case 0x7f3: case 0x7f4: case 0x7f5: case 0x7f6:
+    case 0x7f9: case 0x7fa: case 0x7fb: case 0x7fc: case 0x7fd: case 0x7fe:
         s->csrs[csr - 0x7c0] = value; break;
+    case 0xbe0: case 0xbe1: case 0xbe2: case 0xbe3: case 0xbe4: case 0xbe5:
+        s->mattri_high[csr - 0xbe0] = value; break;
     default: return RISCV_EXCP_ILLEGAL_INST;
     }
     return RISCV_EXCP_NONE;
@@ -363,9 +388,12 @@ void nuclei_n300_init(RISCVCPU *cpu, bool dsp, unsigned irq_count,
     cpu->env.arcs_dsp = dsp;
     if (!installed) {
         static const int csrs[] = {
-            0x801, 0x307, 0x346, 0x347, 0x7c4, 0x7c6, 0x7c7, 0x7c8, 0x7c9,
+            0x801, 0x307, 0x346, 0x347, 0x4cf, 0x7c4, 0x7c6, 0x7c7, 0x7c8, 0x7c9,
             0x7ca, 0x7cb, 0x7cc, 0x7d0, 0x7eb, 0x7ec, 0x7ee, 0x7ef,
-            0x7f3, 0x7f4, 0x7f5, 0x7f6, 0x7f7, 0x810, 0x811, 0xfc0, 0xfc1, 0xfc2,
+            0x7f3, 0x7f4, 0x7f5, 0x7f6, 0x7f7,
+            0x7f9, 0x7fa, 0x7fb, 0x7fc, 0x7fd, 0x7fe,
+            0xbe0, 0xbe1, 0xbe2, 0xbe3, 0xbe4, 0xbe5,
+            0x810, 0x811, 0xfc0, 0xfc1, 0xfc2,
         };
         riscv_csr_operations custom = {
             .name = "arcs-n300", .predicate = predicate,
@@ -378,6 +406,12 @@ void nuclei_n300_init(RISCVCPU *cpu, bool dsp, unsigned irq_count,
             .name = "mnxti", .predicate = predicate, .op = op_mnxti,
         };
         riscv_set_csr_ops(0x345, &mnxti);
+        riscv_csr_operations scratch_swap = {
+            .name = "mscratchcsw", .predicate = predicate, .op = op_scratch_swap,
+        };
+        riscv_set_csr_ops(0x348, &scratch_swap);
+        scratch_swap.name = "mscratchcswl";
+        riscv_set_csr_ops(0x349, &scratch_swap);
         riscv_get_csr_ops(CSR_MTVEC, &original_mtvec);
         custom = original_mtvec; custom.write = write_mtvec;
         riscv_set_csr_ops(CSR_MTVEC, &custom);

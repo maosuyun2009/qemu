@@ -2,6 +2,7 @@
 #ifndef HW_RISCV_VENUSA_H
 #define HW_RISCV_VENUSA_H
 #include "hw/sysbus.h"
+#include "hw/usb/listenai_musb.h"
 #include "hw/core/listenai-board.h"
 #include "hw/misc/listenai_luna.h"
 #include "qemu/units.h"
@@ -61,6 +62,7 @@ struct VenusASoC {
     ListenAIXccela psram_chip;
     ListenAIPSRAM psram_ctrl;
     ListenAISD sd;
+    ListenAIMUSB usb;
     ListenAINOR nor;
     ListenAISpiMem flash_ctrl;
     MemoryRegion flash_delay_io;

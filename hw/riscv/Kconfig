@@ -1,4 +1,5 @@
 config VENUSA
+    select LISTENAI_MUSB
     select LISTENAI_BOARD
     select FT6236
     select LISTENAI_I2S

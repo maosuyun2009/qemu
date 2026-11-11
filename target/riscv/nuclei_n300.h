@@ -5,6 +5,7 @@
 /* Functional N300/ECLIC contract, parameterized by the containing SoC. */
 typedef struct NucleiN300State {
     uint32_t csrs[64];
+    uint32_t mattri_high[6]; /* Region 5..7 base/mask CSRs at 0xbe0..0xbe5. */
     uint32_t mtvt;
     uint16_t irq_count;
     uint8_t intctl_bits, clic_version;

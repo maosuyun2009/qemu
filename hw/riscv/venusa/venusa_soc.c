@@ -2,6 +2,7 @@
 /* CSK70xx shared address space and Nuclei interrupt integration. */
 #include "qemu/osdep.h"
 #include "hw/riscv/venusa/venusa.h"
+#include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 #include "hw/loader.h"
@@ -158,6 +159,10 @@ static void reset(DeviceState *dev)
     venusa_codec_reset(s);
     venusa_audio_reset(s);
     venusa_luna_reset(s);
+    listenai_musb_reset(&s->usb);
+    listenai_musb_configure(&s->usb, (s->syscfg[0x34 / 4] & 4) != 0,
+                           (s->syscfg[0x40 / 4] & (1u << 18)) != 0,
+                           (s->syscfg[0x40 / 4] & (1u << 14)) != 0);
     venusa_dvp_reset(s);
     venusa_image_reset(s);
     venusa_dvp_clock(s);
@@ -184,6 +189,11 @@ static void cidu_fault(void *opaque, hwaddr address, unsigned size,
                        bool write, uint64_t value)
 {
     venusa_fail(opaque, address, size, write, value);
+}
+
+static void usb_irq(void *opaque, int n, int level)
+{
+    venusa_irq(opaque, 56, level);
 }
 
 static void realize(DeviceState *dev, Error **errp)
@@ -242,6 +252,11 @@ static void realize(DeviceState *dev, Error **errp)
     s->cidu.irq = cidu_irq;
     s->cidu.fail = cidu_fault;
     nuclei_cidu_init(&s->cidu, OBJECT(s), "venusa-cidu", 0x47000000, 2, 80, 32, 20, 19);
+    object_initialize_child(OBJECT(s), "usb", &s->usb, TYPE_LISTENAI_MUSB);
+    sysbus_realize(SYS_BUS_DEVICE(&s->usb), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->usb), 0, 0x41000000);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->usb), 0,
+                       qemu_allocate_irq(usb_irq, s, 0));
     venusa_gpio_init(s);
     venusa_dma_init(s);
     venusa_spi_init(s);

@@ -47,6 +47,9 @@ static uint32_t *configuration(VenusASoC *s, hwaddr address)
     if (address == 0x43100010 || address == 0x43100084) {
         return &s->syscfg[(address - 0x43100000) / 4];
     }
+    if (address == 0x43100040) {
+        return &s->syscfg[0x40 / 4];
+    }
     if (address == 0x4310000c) { return &s->syscfg[0x0c / 4]; }
     if (address == 0x431000a0) { return &s->syscfg[0xa0 / 4]; }
     if (address >= 0x43100018 && address <= 0x43100034) {
@@ -113,6 +116,22 @@ bool venusa_sysctl_write(VenusASoC *s, hwaddr address, uint32_t value)
                 qemu_cpu_kick(CPU(&s->cpu[1]));
             }
             return true;
+        }
+        /* Only USB_CTRL1 IDDIG[18] and UTMI16[14] are modeled. */
+        if (address == 0x43100040 &&
+            (value & ~((1u << 18) | (1u << 14)))) {
+            return false;
+        }
+        if (address == 0x43100034 || address == 0x43100040) {
+            uint32_t clock = address == 0x43100034 ?
+                             value : s->syscfg[0x34 / 4];
+            uint32_t config = address == 0x43100040 ?
+                              value : s->syscfg[0x40 / 4];
+            if (!listenai_musb_configure(&s->usb, (clock & 4) != 0,
+                                        (config & (1u << 18)) != 0,
+                                        (config & (1u << 14)) != 0)) {
+                return false;
+            }
         }
         *reg = value;
         if (address == 0x43000000 && (value & (1u << 25)) && !(previous & (1u << 25))) {
@@ -183,10 +202,19 @@ bool venusa_sysctl_write(VenusASoC *s, hwaddr address, uint32_t value)
         return true;
     }
     if (address == 0x43100014) {
-        const uint32_t supported = 7u | (1u << 16) | (1u << 25) | (1u << 21) | (1u << 27) | (3u << 10) | (3u << 12) | (1u << 26) | (3u << 29) | (1u << 15) | (3u << 5) | (1u << 9) | (15u << 17) | (1u << 14) | (3u << 7);
+        const uint32_t supported = 7u | (1u << 16) | (1u << 25) |
+            (1u << 21) | (1u << 27) | (3u << 10) | (3u << 12) |
+            (1u << 26) | (3u << 29) | (1u << 15) | (3u << 5) |
+            (1u << 9) | (15u << 17) | (1u << 14) | (3u << 3) | (1u << 8);
         if (value & ~supported) { return false; }
+        /* CMN_SYSCFG SW_RESET_CFG2: SPI0/1[3:4], IR[7], USBC[8]. */
         for (unsigned i = 0; i < 2; i++) {
-            if (value & (1u << (7 + i))) { listenai_spi_reset(&s->spi[i].device); }
+            if (value & (1u << (3 + i))) {
+                listenai_spi_reset(&s->spi[i].device);
+            }
+        }
+        if (value & (1u << 8)) {
+            listenai_musb_reset(&s->usb);
         }
         if (value & (1u << 14)) { venusa_gpadc_reset(&s->gpadc); }
         if (value & (1u << 21)) { venusa_dvp_reset(s); }
