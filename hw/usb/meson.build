@@ -91,4 +91,4 @@ system_ss.add(when: ['CONFIG_USB', 'CONFIG_XEN_BUS', libusb], if_true: files('xe
 
 modules += { 'hw-usb': hw_usb_modules }
 
-system_ss.add(when: 'CONFIG_LISTENAI_MUSB', if_true: files('listenai_musb.c'))
+system_ss.add(when: 'CONFIG_LISTENAI_MUSB', if_true: [files('listenai_musb.c', 'dev-uvc.c'), dependency('libjpeg', required: config_all_devices.has_key('CONFIG_LISTENAI_MUSB'))])

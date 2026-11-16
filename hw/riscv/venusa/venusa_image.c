@@ -2,6 +2,8 @@
 /* VenusA image-controller bus, IRQ and clock wiring. */
 #include "qemu/osdep.h"
 #include "system/address-spaces.h"
+#include "hw/irq.h"
+#include "qapi/error.h"
 #include "hw/riscv/venusa/venusa.h"
 
 static void fault(void *opaque, hwaddr address, unsigned size, bool write,
@@ -11,6 +13,8 @@ static void dma_irq(void *opaque, unsigned channel, bool level)
 { venusa_irq(opaque, 49 + channel, level); }
 static void rgb_irq(void *opaque, bool level)
 { venusa_irq(opaque, 60, level); }
+static void jpeg_irq(void *opaque, int n, int level)
+{ venusa_irq(opaque, 61, level); }
 static void request_changed(void *opaque)
 {
     VenusASoC *s = opaque;
@@ -34,6 +38,22 @@ static bool memory_allowed(void *opaque, hwaddr address, unsigned size, bool wri
 static bool request(void *opaque, unsigned handshake, hwaddr address, bool write)
 {
     VenusASoC *s = opaque;
+    if ((handshake == 4 && address == VENUSA_JPEG_ECS) ||
+        (handshake == 5 && address == VENUSA_JPEG_PIXEL)) {
+        bool input = venusa_jpeg_encoding(&s->jpeg) ? handshake == 5 : handshake == 4;
+        if (write != input) {
+            venusa_fail(s, address, 4, write, handshake);
+        }
+        if (s->syscfg[0xa0 / 4] & ((1u << handshake) | (1u << (16 + handshake)))) {
+            venusa_fail(s, address, 4, write, handshake);
+        }
+        return venusa_jpeg_request(&s->jpeg, write);
+    }
+    if (handshake == 3 && address == 0x42001000 && !write) {
+        bool route = (s->syscfg[0xa0 / 4] & ((1u << 3) | (1u << 15) | (1u << 19))) == (1u << 15);
+        return route && s->dvp.clock && (s->dvp.regs[0x1c / 4] & 1) &&
+               s->dvp.request && s->dvp.count;
+    }
     if (handshake != 0 || address != 0x4200b0f4 || !write ||
         (s->syscfg[0xa0 / 4] & ((1u << 16) | 1u))) {
         venusa_fail(s, address, 4, write, handshake);
@@ -62,6 +82,7 @@ void venusa_image_clock(VenusASoC *s)
     venusa_rgb_clock(&s->rgb, enabled, n/a, d/a);
     venusa_hclk_ratio(s, &n, &d);
     venusa_dma2d_clock(&s->dma2d, (s->syscfg[0x34/4] & 16) != 0, n, d);
+    venusa_jpeg_clock(&s->jpeg, (s->syscfg[0x34/4] & 0x100) != 0);
 }
 void venusa_image_init(VenusASoC *s)
 {
@@ -73,11 +94,22 @@ void venusa_image_init(VenusASoC *s)
     venusa_rgb_init(&s->rgb, OBJECT(s), 0x4200b000, rgb);
     memory_region_add_subregion(get_system_memory(), 0x44900000, &s->dma2d.io);
     memory_region_add_subregion(get_system_memory(), 0x4200b000, &s->rgb.io);
+    object_initialize_child(OBJECT(s), "jpeg", &s->jpeg, TYPE_VENUSA_JPEG);
+    s->jpeg.fault = fault;
+    s->jpeg.fault_opaque = s;
+    s->jpeg.request_changed = request_changed;
+    sysbus_realize(SYS_BUS_DEVICE(&s->jpeg), &error_fatal);
+    for (unsigned i = 0; i < G_N_ELEMENTS(s->jpeg.windows); i++) {
+        sysbus_mmio_map(SYS_BUS_DEVICE(&s->jpeg), i, VENUSA_JPEG_BASE + s->jpeg.windows[i].offset);
+    }
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->jpeg), 0, qemu_allocate_irq(jpeg_irq, s, 0));
     s->rgb_div = 0;
 }
 void venusa_image_reset(VenusASoC *s)
 {
     s->rgb_div=0; s->rgb_clock_config=0;
     venusa_dma2d_reset(&s->dma2d); venusa_rgb_reset(&s->rgb);
+    venusa_jpeg_reset(&s->jpeg);
+    s->jpeg.decoded_frames = s->jpeg.output_bytes = 0;
     venusa_image_clock(s);
 }

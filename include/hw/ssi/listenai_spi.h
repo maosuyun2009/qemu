@@ -52,7 +52,7 @@ struct ListenaiSPI {
     bool serial, selected, pin_clock, pin_data, pin_cs, inflight, consumed;
     unsigned bit_index, half_edges, tx_left, rx_packed;
     uint32_t serial_tx, serial_rx, packed_tx, packed_rx;
-    uint64_t remaining, frames;
+    uint64_t remaining, frames, slave_rx_frames;
     Int128 work;
     uint64_t rate;
     int64_t updated;

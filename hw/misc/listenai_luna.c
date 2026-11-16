@@ -9,6 +9,10 @@
 #endif
 #include "qemu/error-report.h"
 
+#if LISEM_LUNA_VENUSA_FACTORY
+extern LisemLuna *lisem_luna_create_venusa(const LisemLunaHost *host);
+#endif
+
 static bool read_memory(void *opaque, uint32_t address, void *data, size_t size)
 {
     return address_space_read(&address_space_memory, address,
@@ -75,8 +79,11 @@ static G_NORETURN void fatal(void *opaque, const char *message)
 static void update_irq(ListenAILUNA *s)
 {
     if (s->irq) {
-        s->irq(s->opaque, (lisem_luna_read(s->backend, 0xd8, 4) &
-                          ~s->irq_mask) != 0);
+        uint32_t pending = lisem_luna_read(s->backend, 0xd8, 4) & ~s->irq_mask;
+        if (s->venusa)
+            pending |= lisem_luna_read(s->backend, 0x1dc, 4) &
+                       ~lisem_luna_read(s->backend, 0x1d8, 4);
+        s->irq(s->opaque, pending != 0);
     }
 }
 
@@ -147,9 +154,10 @@ static const MemoryRegionOps ops = {
 void listenai_luna_init(ListenAILUNA *s, Object *owner, MemoryRegion *memory,
                        hwaddr base, uint32_t reset_mask, bool safe_reads,
                        void *opaque,
-                       void (*fatal_callback)(void *, const char *))
+                       void (*fatal_callback)(void *, const char *), bool venusa)
 {
     s->reset_mask = reset_mask;
+    s->venusa = venusa;
     s->irq_mask_bits = UINT32_MAX;
     s->opaque = opaque;
     s->fatal = fatal_callback;
@@ -161,7 +169,11 @@ void listenai_luna_init(ListenAILUNA *s, Object *owner, MemoryRegion *memory,
         .read = read_memory, .write = write_memory, .sha256 = sha256,
         .schedule = schedule, .cancel = cancel, .fatal = fatal,
     };
+#if LISEM_LUNA_VENUSA_FACTORY
+    s->backend = venusa ? lisem_luna_create_venusa(&host) : lisem_luna_create(&host);
+#else
     s->backend = lisem_luna_create(&host);
+#endif
     if (!s->backend) { fatal(s, "LUNA backend ABI mismatch"); }
     memory_region_init_io(&s->io, owner, &ops, s, "listenai-luna", 0x1000);
     memory_region_add_subregion(memory, base, &s->io);

@@ -17,6 +17,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(VenusACamera, VENUSA_CAMERA)
 struct VenusACamera {
     DeviceState parent_obj;
     char *soc_path, *file;
+    uint32_t i2c_bus, scl_pad, sda_pad, sccb_function;
     VenusASoC *soc;
     DeviceState *sensor;
     ListenaiCameraScene scene;
@@ -26,6 +27,8 @@ struct VenusACamera {
     unsigned width, height, bpp, sync, row, byte, stage;
     bool active;
 };
+static bool sccb_route(void *opaque);
+
 static uint64_t deadline(VenusACamera *s, uint64_t clocks)
 {
     __uint128_t n = (__uint128_t)clocks * s->hz_d * 1000000000;
@@ -175,10 +178,22 @@ static void realize(DeviceState *dev, Error **errp)
         error_setg(errp, "GC0328 fixture requires a VenusA soc path and RGB888 input file"); return;
     }
     s->soc = VENUSA_SOC(soc);
-    if (s->soc->dvp.camera_clock_changed) {
-        error_setg(errp, "VenusA camera connector is already occupied"); return;
+    if (s->i2c_bus > 1) {
+        error_setg(errp, "GC0328 fixture requires I2C bus 0 or 1"); return;
     }
-    s->sensor = DEVICE(i2c_slave_create_simple(s->soc->i2c[1].bus, TYPE_GC0328, 0x21));
+    if (s->scl_pad == UINT32_MAX) { s->scl_pad = s->i2c_bus ? 34 : 19; }
+    if (s->sda_pad == UINT32_MAX) { s->sda_pad = s->i2c_bus ? 33 : 20; }
+    bool primary = !s->i2c_bus && s->scl_pad == 19 && s->sda_pad == 20;
+    bool alternate = !s->i2c_bus && s->scl_pad == 46 && s->sda_pad == 47;
+    bool bus1 = s->i2c_bus && (s->scl_pad == 32 || s->scl_pad == 34) && s->sda_pad == 33;
+    if (!primary && !alternate && !bus1) {
+        error_setg(errp, "Unsupported VenusA SCCB pad route"); return;
+    }
+    s->sccb_function = primary ? 7 : 8;
+    if (s->soc->dvp.camera_clock_changed || s->soc->i2c[s->i2c_bus].route_valid) {
+        error_setg(errp, "VenusA camera connector or SCCB route is already occupied"); return;
+    }
+    s->sensor = DEVICE(i2c_slave_create_simple(s->soc->i2c[s->i2c_bus].bus, TYPE_GC0328, 0x21));
     if (s->file) {
     struct stat st;
     if (stat(s->file, &st) || !S_ISREG(st.st_mode) || st.st_size != 640 * 480 * 3) {
@@ -197,6 +212,8 @@ static void realize(DeviceState *dev, Error **errp)
     s->soc->dvp.camera_clock_changed = clock_changed;
     s->soc->dvp.camera_opaque = s;
     gc0328_set_notify(s->sensor, notify, s);
+    s->soc->i2c[s->i2c_bus].route_valid = sccb_route;
+    s->soc->i2c[s->i2c_bus].route_opaque = s;
     qemu_register_resettable(OBJECT(s));
 }
 static void unrealize(DeviceState *dev)
@@ -206,6 +223,10 @@ static void unrealize(DeviceState *dev)
     listenai_camera_scene_destroy(&s->scene);
     timer_free(s->timer);
     gc0328_set_notify(s->sensor, NULL, NULL);
+    if (s->soc->i2c[s->i2c_bus].route_opaque == s) {
+        s->soc->i2c[s->i2c_bus].route_valid = NULL;
+        s->soc->i2c[s->i2c_bus].route_opaque = NULL;
+    }
     s->soc->dvp.camera_clock_changed = NULL;
     s->soc->dvp.camera_opaque = NULL;
     qdev_unrealize(s->sensor);
@@ -226,8 +247,8 @@ static void source_changed(void *opaque)
 static bool sccb_route(void *opaque)
 {
     VenusACamera *s = opaque;
-    return listenai_pinmux_function(&s->soc->pinmux, 34, 8) &&
-           listenai_pinmux_function(&s->soc->pinmux, 33, 8);
+    return listenai_pinmux_function(&s->soc->pinmux, s->scl_pad, s->sccb_function) &&
+           listenai_pinmux_function(&s->soc->pinmux, s->sda_pad, s->sccb_function);
 }
 
 DeviceState *venusa_board_camera_connect(VenusASoC *soc, Object *owner, ListenaiBoard *b)
@@ -246,8 +267,6 @@ DeviceState *venusa_board_camera_connect(VenusASoC *soc, Object *owner, Listenai
     qdev_realize_and_unref(dev, NULL, &error_fatal);
     VenusACamera *s = VENUSA_CAMERA(dev);
     listenai_board_camera_wire(b, DEVICE(soc), s->sensor);
-    soc->i2c[1].route_valid = sccb_route;
-    soc->i2c[1].route_opaque = s;
     listenai_camera_scene_init(&s->scene, owner, s->sensor, gc0328_set_frame, gc0328_clear_frame,
                                getenv("LISEM_QEMU_CAMERA_SHM"),
                                source_changed, receiver_enabled, s);
@@ -262,6 +281,9 @@ char *venusa_board_camera_status(DeviceState *dev)
 static const Property props[] = {
     DEFINE_PROP_STRING("soc", VenusACamera, soc_path),
     DEFINE_PROP_STRING("file", VenusACamera, file),
+    DEFINE_PROP_UINT32("i2c-bus", VenusACamera, i2c_bus, 1),
+    DEFINE_PROP_UINT32("scl-pad", VenusACamera, scl_pad, UINT32_MAX),
+    DEFINE_PROP_UINT32("sda-pad", VenusACamera, sda_pad, UINT32_MAX),
 };
 static void class_init(ObjectClass *klass, const void *data)
 {
@@ -270,7 +292,7 @@ static void class_init(ObjectClass *klass, const void *data)
     dc->user_creatable = true;
     device_class_set_legacy_reset(dc, reset);
     device_class_set_props(dc, props);
-    dc->desc = "Explicit GC0328 camera connected to VenusA I2C1 and DVP";
+    dc->desc = "Explicit GC0328 camera connected to VenusA I2C and DVP";
 }
 static const TypeInfo info = {
     .name = TYPE_VENUSA_CAMERA, .parent = TYPE_DEVICE,

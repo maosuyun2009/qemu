@@ -1315,6 +1315,21 @@ static void decode_opc(CPURISCVState *env, DisasContext *ctx)
             return;
         }
         if (env->arcs_dsp && ctx->xl == MXL_RV32 &&
+            ((opcode & 0xfff0707f) == 0xacc0007f ||
+             (opcode & 0xfff0707f) == 0xad70007f)) {
+            /* ZUNPKD810/832 zero-extend two source bytes into halfwords. */
+            TCGv source = get_gpr(ctx, extract32(opcode, 15, 5), EXT_NONE);
+            TCGv pair = tcg_temp_new(), high = tcg_temp_new();
+            tcg_gen_shri_tl(pair, source, (opcode & 0xfff00000) == 0xad700000 ? 16 : 0);
+            tcg_gen_andi_tl(high, pair, 0xff00);
+            tcg_gen_shli_tl(high, high, 8);
+            tcg_gen_andi_tl(pair, pair, 0xff);
+            tcg_gen_or_tl(pair, pair, high);
+            gen_set_gpr(ctx, extract32(opcode, 7, 5), pair);
+            ctx->cur_insn_len = 4;
+            return;
+        }
+        if (env->arcs_dsp && ctx->xl == MXL_RV32 &&
             ((opcode & 0xfe00707f) == 0x1000707f ||
              (opcode & 0xfe00707f) == 0x5600707f ||
              (opcode & 0xfe00707f) == 0x8400107f ||

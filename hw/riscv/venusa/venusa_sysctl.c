@@ -177,6 +177,7 @@ bool venusa_sysctl_write(VenusASoC *s, hwaddr address, uint32_t value)
             venusa_audio_dma_update(s);
             venusa_spi_dma_update(s);
             venusa_dvp_dma_update(s);
+            venusa_dma2d_request(&s->dma2d);
         }
         if (address == 0x4310001c || address == 0x43100020 ||
             (address >= 0x43000000 && address <= 0x43000018)) { venusa_spi_clock(s); }
@@ -203,7 +204,7 @@ bool venusa_sysctl_write(VenusASoC *s, hwaddr address, uint32_t value)
     }
     if (address == 0x43100014) {
         const uint32_t supported = 7u | (1u << 16) | (1u << 25) |
-            (1u << 21) | (1u << 27) | (3u << 10) | (3u << 12) |
+            (1u << 21) | (1u << 24) | (1u << 27) | (3u << 10) | (3u << 12) |
             (1u << 26) | (3u << 29) | (1u << 15) | (3u << 5) |
             (1u << 9) | (15u << 17) | (1u << 14) | (3u << 3) | (1u << 8);
         if (value & ~supported) { return false; }
@@ -218,6 +219,7 @@ bool venusa_sysctl_write(VenusASoC *s, hwaddr address, uint32_t value)
         }
         if (value & (1u << 14)) { venusa_gpadc_reset(&s->gpadc); }
         if (value & (1u << 21)) { venusa_dvp_reset(s); }
+        if (value & (1u << 24)) { venusa_jpeg_reset(&s->jpeg); }
         if (value & (1u << 16)) { venusa_dma2d_reset(&s->dma2d); }
         if (value & (1u << 25)) { venusa_rgb_reset(&s->rgb); }
         if (value & (1u << 27)) { venusa_luna_reset(s); }

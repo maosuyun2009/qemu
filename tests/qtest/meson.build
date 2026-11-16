@@ -280,7 +280,7 @@ qtests_s390x = \
 
 qtests_riscv32 = \
   (config_all_devices.has_key('CONFIG_ARCS') ? ['arcs-i2s-test', 'arcs-spi-test'] : []) + \
-  (config_all_devices.has_key('CONFIG_VENUSA') ? ['listenai-eclic-test', 'venusa-peripherals-test', 'venusa-audio-test', 'listenai-dma-peripheral-test', 'venusa-gpadc-test', 'venusa-spi-test', 'venusa-spi-slave-test', 'venusa-i2c-test', 'venusa-pwm-test', 'venusa-luna-test', 'venusa-calendar-test', 'listenai-uart-dma-test', 'venusa-dvp-test', 'venusa-camera-test', 'venusa-image-test', 'venusa-touch-test', 'venusa-i2s-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_VENUSA') ? ['listenai-eclic-test', 'venusa-peripherals-test', 'listenai-musb-test', 'venusa-audio-test', 'listenai-dma-peripheral-test', 'venusa-gpadc-test', 'venusa-spi-test', 'venusa-spi-slave-test', 'listenai-spi-source-test', 'venusa-i2c-test', 'venusa-pwm-test', 'venusa-luna-test', 'venusa-calendar-test', 'listenai-uart-dma-test', 'venusa-dvp-test', 'venusa-camera-test', 'venusa-image-test', 'venusa-jpeg-test', 'venusa-scaler-test', 'venusa-touch-test', 'venusa-i2s-test'] : []) + \
   (config_all_devices.has_key('CONFIG_SIFIVE_E_AON') ? ['sifive-e-aon-watchdog-test'] : [])
 
 qtests_riscv64 = ['riscv-csr-test'] + \
@@ -369,6 +369,8 @@ if gnutls.found()
 endif
 
 qtests = {
+  'listenai-musb-test': [dependency('libjpeg', required: config_all_devices.has_key('CONFIG_LISTENAI_MUSB'))],
+  'venusa-jpeg-test': [dependency('libjpeg', required: config_all_devices.has_key('CONFIG_VENUSA'))],
   'aspeed_hace-test': files('aspeed-hace-utils.c', 'aspeed_hace-test.c'),
   'aspeed_smc-test': files('aspeed-smc-utils.c', 'aspeed_smc-test.c'),
   'ast2700-hace-test': files('aspeed-hace-utils.c', 'ast2700-hace-test.c'),

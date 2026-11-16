@@ -63,6 +63,16 @@ class AssetTests(unittest.TestCase):
         (self.directory / 'manifest.json').write_text(json.dumps(manifest))
         self.assertIn(manifest['sha256'], assets.luna_header(
             self.directory, api, 'darwin-aarch64'))
+        self.assertIn('#define LISEM_LUNA_VENUSA_FACTORY 0', assets.luna_header(
+            self.directory, api, 'darwin-aarch64'))
+        changed = dict(manifest, venusa_factory=True)
+        (self.directory / 'manifest.json').write_text(json.dumps(changed))
+        self.assertIn('#define LISEM_LUNA_VENUSA_FACTORY 1', assets.luna_header(
+            self.directory, api, 'darwin-aarch64'))
+        changed['venusa_factory'] = 'yes'
+        (self.directory / 'manifest.json').write_text(json.dumps(changed))
+        with self.assertRaises(ValueError):
+            assets.luna_header(self.directory, api, 'darwin-aarch64')
         for field, value in (('abi', 2), ('target', 'linux-aarch64'),
                              ('file', 'other.a'), ('sha256', 'bad'),
                              ('api_sha256', 'bad')):

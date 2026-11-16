@@ -21,17 +21,22 @@ static void psram_fault(void *opaque, hwaddr address, unsigned size,
 
 void venusa_psram_init(VenusASoC *s)
 {
-    /* Read after a real reset command on CSK7004J8U. MR2 identifies 64 Mbit. */
-    static const uint8_t modes[10] = {
+    /* Preserve the CSK7004J8U reset modes apart from the size-specific MR2. */
+    uint8_t modes[10] = {
         0x09, 0x8d, 0x93, 0xa0, 0x40, 0, 0, 0, 0x05, 0x01,
     };
+    modes[2] = s->psram_bytes == 8 * MiB ? 0x93 : 0xdd;
     listenai_xccela_init(&s->psram_chip, OBJECT(s), "venusa-sip-psram",
-                        8 * MiB, modes);
+                        s->psram_bytes, modes);
     s->psram_chip.mode_read_pairs = true;
     memory_region_add_subregion(get_system_memory(), 0x38000000, &s->psram_chip.ram);
-    memory_region_init_alias(&s->psram_alias, OBJECT(s), "venusa-psram-alias",
-                             &s->psram_chip.ram, 0, 8 * MiB);
-    memory_region_add_subregion(get_system_memory(), 0x38800000, &s->psram_alias);
+    if (s->psram_bytes == 8 * MiB) {
+        memory_region_init_alias(&s->psram_alias, OBJECT(s),
+                                 "venusa-psram-alias", &s->psram_chip.ram,
+                                 0, 8 * MiB);
+        memory_region_add_subregion(get_system_memory(), 0x38800000,
+                                    &s->psram_alias);
+    }
     listenai_psram_init(&s->psram_ctrl, OBJECT(s), "venusa-psram-controller",
                        0x44600000, &s->psram_chip, 8, extra_register, psram_fault, s);
 }

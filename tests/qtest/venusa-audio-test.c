@@ -140,8 +140,9 @@ static void codec_calibration(void)
     qtest_quit(q);
 }
 
-static void codec_stereo(void)
+static void codec_stereo(const void *opaque)
 {
+    bool dmic = GPOINTER_TO_UINT(opaque);
     char *path;
     int fd = g_file_open_tmp("venusa-microphones-XXXXXX", &path, NULL);
     g_assert_cmpint(fd, >=, 0);
@@ -160,7 +161,12 @@ static void codec_stereo(void)
     const uint32_t codec = 0x44800000;
     qtest_writel(q, APC + 0x18, 0x02070007);
     qtest_writel(q, codec, 3);
-    qtest_writel(q, codec + 0x1c, 0xfc3);
+    qtest_writel(q, codec + 0x1c, dmic ? 0x10 : 0xfc3);
+    if (dmic) {
+        qtest_writel(q, codec + 0x14, 0x490000);
+        /* Analog power-down and maximum PGA gain must not affect decoded DMIC samples. */
+        qtest_writel(q, codec + 8, qtest_readl(q, codec + 8) | (31u << 21) | (31u << 16));
+    }
     qtest_writel(q, codec + 4, 0x793);
     qtest_clock_step(q, 62499);
     g_assert_cmphex(qtest_readl(q, APC + 0x18), ==, 0x02070007);
@@ -293,7 +299,11 @@ typedef struct RejectedAudio {
 static const RejectedAudio rejected[] = {
     { "alc", 0x44800010, 0x63192b00 },
     { "noise-filter", 0x4480000c, 0x4000 },
-    { "digital-microphone", 0x44800014, 0xc10146 },
+    { "dmic-latch-mode", 0x44800014, 0xc10146 },
+    { "dmic-source", 0x44800014, 0x690000 },
+    { "dmic-single-edge", 0x44800014, 0x480000 },
+    { "dmic-autoreset", 0x44800014, 0x4490000 },
+    { "dmic-rate-osr", 0x44800004, 0x783 },
     { "debug-capture", 0x44800060, 1 },
     { "unpowered-calibration", 0x44800004, 0x1613 },
     { "pll-codec-clock", 0x43100034, 0xd600 },
@@ -305,6 +315,10 @@ static void rejected_audio(const void *opaque)
     if (g_test_subprocess()) {
         QTestState *q = start();
         qtest_set_expected_status(q, 1);
+        if (!strcmp(r->name, "dmic-rate-osr")) {
+            qtest_writel(q, 0x44800000, 3);
+            qtest_writel(q, 0x44800014, 0x490000);
+        }
         qtest_writel(q, r->address, r->value);
         qtest_quit(q);
         return;
@@ -328,7 +342,8 @@ int main(int argc, char **argv)
     qtest_add_func("venusa/audio/serial-alignment", serial_alignment);
     qtest_add_func("venusa/audio/linked-dma-loopback", linked_audio);
     qtest_add_func("venusa/audio/linked-dma-wide-stereo", linked_audio_wide);
-    qtest_add_func("venusa/audio/codec-stereo-input", codec_stereo);
+    qtest_add_data_func("venusa/audio/codec-stereo-input", GUINT_TO_POINTER(0), codec_stereo);
+    qtest_add_data_func("venusa/audio/codec-dmic-pcm-scene", GUINT_TO_POINTER(1), codec_stereo);
     qtest_add_func("venusa/audio/codec-output-mute", codec_output);
     qtest_add_func("venusa/audio/codec-calibration", codec_calibration);
     qtest_add_func("venusa/audio/initial-fifo-wait", initial_fifo_wait);

@@ -16,7 +16,7 @@ typedef struct ListenAILUNA {
     bool (*write_extra)(void *, hwaddr, uint32_t);
     void (*reset_extra)(void *);
     uint32_t irq_mask, irq_mask_bits;
-    bool safe_reads, clock_enabled, pending;
+    bool safe_reads, clock_enabled, pending, venusa;
     uint64_t remaining;
     uint32_t reset_mask;
 } ListenAILUNA;
@@ -24,7 +24,7 @@ typedef struct ListenAILUNA {
 void listenai_luna_init(ListenAILUNA *s, Object *owner, MemoryRegion *memory,
                        hwaddr base, uint32_t reset_mask, bool safe_reads,
                        void *opaque,
-                       void (*fatal)(void *, const char *));
+                       void (*fatal)(void *, const char *), bool venusa);
 void listenai_luna_reset(ListenAILUNA *s);
 void listenai_luna_clock(ListenAILUNA *s, bool enabled);
 #endif

@@ -68,9 +68,13 @@ def luna_header(directory, api, target):
             or manifest.get('sha256') != digest(archive)
             or manifest.get('api_sha256') != digest(api)):
         raise ValueError('LUNA backend does not match its target, ABI or manifest')
+    venus = manifest.get('venusa_factory', False)
+    if type(venus) is not bool:
+        raise ValueError('Invalid optional VenusA factory capability')
     # Archive changes invalidate the including object and therefore its link.
-    return ('/* Validated LUNA ABI 1; archive SHA-256: %s */\n' %
-            manifest['sha256'])
+    return ('/* Validated LUNA ABI 1; archive SHA-256: %s */\n'
+            '#define LISEM_LUNA_VENUSA_FACTORY %d\n' %
+            (manifest['sha256'], int(venus)))
 
 
 def main():

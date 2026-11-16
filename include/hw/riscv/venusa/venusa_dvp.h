@@ -9,7 +9,7 @@ typedef struct VenusADVP {
     unsigned head, count, packed, line, byte;
     int input[4];
     bool clock, frame, last_vsync, last_hsync, request;
-    uint64_t samples, frames, overflow;
+    uint64_t samples, frames, overflow, captured_frames, short_lines, short_frames;
     uint32_t xclk_config, xclk_div;
     void (*camera_clock_changed)(void *opaque);
     void *camera_opaque;

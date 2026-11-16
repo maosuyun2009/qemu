@@ -31,6 +31,23 @@ char *venusa_snapshot(VenusASoC *s, const char *status)
     }
     g_string_append_printf(out, "],\"uart_tx_bytes\":[%" PRIu64 ",%" PRIu64 ",%" PRIu64 "]",
         s->uart[0].device.tx_bytes, s->uart[1].device.tx_bytes, s->uart[2].device.tx_bytes);
+    g_string_append_printf(out, ",\"jpeg\":{\"decoded_frames\":%" PRIu64
+        ",\"output_bytes\":%" PRIu64 "}", s->jpeg.decoded_frames, s->jpeg.output_bytes);
+    g_string_append_printf(out, ",\"dvp\":{\"frames\":%" PRIu64
+        ",\"captured_frames\":%" PRIu64 ",\"samples\":%" PRIu64
+        ",\"overflow\":%" PRIu64 ",\"short_lines\":%" PRIu64
+        ",\"short_frames\":%" PRIu64 "}", s->dvp.frames, s->dvp.captured_frames,
+        s->dvp.samples, s->dvp.overflow, s->dvp.short_lines, s->dvp.short_frames);
+    g_string_append(out, ",\"spi\":[");
+    for (unsigned i = 0; i < 2; i++) {
+        ListenaiSPI *spi = &s->spi[i].device;
+        g_string_append_printf(out, "%s{\"index\":%u,\"slave\":%s,\"serial_frames\":%" PRIu64
+            ",\"received_frames\":%" PRIu64 ",\"rx_overflow\":%s}",
+            i ? "," : "", i, spi->regs[0x10 / 4] & 4 ? "true" : "false",
+            spi->frames, spi->slave_rx_frames,
+            spi->regs[0x60 / 4] & (1u << 17) ? "true" : "false");
+    }
+    g_string_append(out, "]");
     g_string_append_printf(out, ",\"audio\":{\"adc_frames\":%" PRIu64
         ",\"dac_frames\":%" PRIu64 ",\"input_frames\":%" PRIu64
         ",\"input_missing\":%" PRIu64 ",\"output_samples\":%" PRIu64

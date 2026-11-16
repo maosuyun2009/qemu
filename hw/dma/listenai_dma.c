@@ -79,6 +79,10 @@ static void service(ListenAIDMA *s)
                     t->remaining--;
                     bus_write(s, R(off + 8), t->width, value);
                     R(off + 8) = advance(R(off + 8), t->width, t->dest_mode);
+                    if (t->scatter) {
+                        R(off + 8) = skip(s, R(off + 8), ++t->scatter_items,
+                                          t->scatter, t->width, t->dest_mode);
+                    }
                     R(off + 0x1c)++;
                 }
             }
@@ -136,7 +140,8 @@ static void transfer(ListenAIDMA *s, unsigned ch)
             bool receive = type == 2;
             unsigned msize = (control >> (receive ? 14 : 11)) & 7;
             if (sw != dw || (receive ? sm : dm) != 2 ||
-                !count || (control & 0x60000) ||
+                !count || (control & 0x20000) ||
+                ((control & 0x40000) && (!receive || dm != 0 || !(R(off + 0x50) >> 20))) ||
                 ((control & 0x18000000) && (control & 0x18000000) != 0x18000000) ||
                 (config & (receive ? 0x800 : 0x400))) {
                 fail(s, off + 0x18, control);
@@ -144,6 +149,7 @@ static void transfer(ListenAIDMA *s, unsigned ch)
             s->channel[ch] = (ListenAIDMATransfer) {
                 .active = true, .receive = receive, .remaining = count, .width = sw,
                 .descriptor = descriptor,
+                .scatter = (control & 0x40000) ? R(off + 0x50) : 0,
                 .source_mode = sm, .dest_mode = dm,
                 .request = (R(off + 0x44) >> (receive ? 7 : 11)) & 15,
                 .burst = msize ? 1u << (msize + 1) : 1,

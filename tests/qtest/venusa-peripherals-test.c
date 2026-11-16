@@ -13,14 +13,20 @@
 
 static char *flash_path, *sd_path, *otp_path;
 
-static QTestState *start(bool sd)
+static QTestState *start_options(bool sd, const char *options)
 {
     g_autofree char *flash = g_shell_quote(flash_path);
     g_autofree char *card = g_shell_quote(sd_path);
     g_autofree char *drive = sd ? g_strdup_printf(
         "-drive if=none,id=sdcard,file=%s,format=raw", card) : g_strdup("");
     return qtest_initf("-machine venusa-rd-evb "
-                       "-drive if=pflash,format=raw,file=%s %s", flash, drive);
+                       "-drive if=pflash,format=raw,file=%s %s %s",
+                       flash, drive, options);
+}
+
+static QTestState *start(bool sd)
+{
+    return start_options(sd, "");
 }
 
 /* The firmware's shared TX/RX FIFO layout consumes 3840 of 4096 bytes. */
@@ -102,7 +108,7 @@ static void usb_configuration(void)
 
     qtest_writel(q, USB_CLOCK, 4);
     qtest_writel(q, USB_CTRL1, (1u << 18) | (1u << 14));
-    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 0);
+    g_assert_cmphex(qtest_readb(q, USB + 0x60), ==, 0x80); /* BDEVICE follows IDDIG. */
     qtest_writel(q, USB_CTRL1, 1u << 14);
     qtest_writeb(q, USB + 0x60, 1);
     qtest_writeb(q, USB + 0x60, qtest_readb(q, USB + 0x60) & ~1);
@@ -186,15 +192,14 @@ typedef struct USBRejected {
 } USBRejected;
 
 static const USBRejected usb_rejections[] = {
-    { "tx-ready", USB + 0x12, 2, 1 },
-    { "fifo", USB + 0x20, 0x12345678, 4 },
+    { "tx-invalid-setup", USB + 0x12, 0x0a, 1 },
+    { "fifo-empty-read", USB + 0x20, 0, 1, true },
     { "dma", USB + 0x204, 1, 4 },
-    { "unknown-read", USB, 0, 1, true },
+    { "unknown-read", USB + 0x61, 0, 1, true },
     { "wide-enable", USB + 0x06, 0, 4 },
     { "narrow-enable", USB + 0x06, 0, 1 },
     { "wide-power", USB + 0x01, 0, 2 },
     { "power-resume", USB + 0x01, 4, 1 },
-    { "power-reset", USB + 0x01, 8, 1 },
     { "power-softconn", USB + 0x01, 0x40, 1 },
     { "power-isoupdate", USB + 0x01, 0x80, 1 },
     { "power-all", USB + 0x01, 0xff, 1 },
@@ -208,13 +213,16 @@ static const USBRejected usb_rejections[] = {
     { "double-fifo", USB + 0x63, 0x19, 1 },
     { "host-request", USB + 0x60, 2, 1 },
     { "gated", USB + 0x60, 1, 1 },
-    { "device-session", USB + 0x60, 1, 1 },
     { "utmi8-session", USB + 0x60, 1, 1 },
+    { "device-resume", USB + 0x01, 4, 1 },
+    { "device-isoupdate", USB + 0x01, 0x80, 1 },
+    { "device-tx-packet", USB + 0x12, 2, 1 },
+    { "device-rx-request", USB + 0x12, 0x20, 1 },
+    { "device-role-switch", USB_CTRL1, 1u << 14, 4 },
     { "config-reserved", USB_CTRL1, 1u << 31, 4 },
     { "config-bist", USB_CTRL1, 1u << 20, 4 },
     { "active-iddig", USB_CTRL1, (1u << 18) | (1u << 14), 4 },
     { "active-utmi8", USB_CTRL1, 0, 4 },
-    { "status-write", USB + 0x02, 0, 2 },
     { "ir-reset", 0x43100014, 1u << 7, 4 },
 };
 
@@ -229,8 +237,9 @@ static void usb_rejected(const void *opaque)
         qtest_writel(q, USB_CTRL1, 1u << 14);
         if (!strcmp(test->name, "gated")) {
             qtest_writel(q, USB_CLOCK, 0);
-        } else if (!strcmp(test->name, "device-session")) {
+        } else if (g_str_has_prefix(test->name, "device-")) {
             qtest_writel(q, USB_CTRL1, (1u << 18) | (1u << 14));
+            qtest_writeb(q, USB + 0x60, 1);
         } else if (!strcmp(test->name, "utmi8-session")) {
             qtest_writel(q, USB_CTRL1, 0);
         } else if (g_str_has_prefix(test->name, "active-")) {
@@ -300,9 +309,9 @@ static void systimer(void)
     qtest_quit(q);
 }
 
-static void psram(void)
+static void psram(const void *opaque)
 {
-    QTestState *q = start(false);
+    QTestState *q = start_options(false, opaque);
     static const uint32_t reset_modes[] = {
         0x8d09, 0x938d, 0xa093, 0x40a0, 0x0540, 0, 0, 0, 0x0905, 0x0101,
     };
@@ -321,6 +330,52 @@ static void psram(void)
     g_assert_cmphex(qtest_readl(q, 0x38700000), ==, 0xaabbccdd);
     g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x800), ==, 0x8d09);
     qtest_quit(q);
+}
+
+static void psram_16mib(void)
+{
+    QTestState *q = start_options(false,
+        "-global venusa-soc.psram-bytes=16777216");
+    static const uint32_t addresses[] = {
+        0x38000000, 0x387ffffc, 0x38800000, 0x38fffffc,
+    };
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(addresses); i++) {
+        qtest_writel(q, addresses[i], 0x12340000 + i);
+    }
+    for (unsigned i = 0; i < G_N_ELEMENTS(addresses); i++) {
+        g_assert_cmphex(qtest_readl(q, addresses[i]), ==, 0x12340000 + i);
+    }
+    /* MR2 density=5, device ID=3, including paired MR1/MR2 reads. */
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x804), ==, 0xdd8d);
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x808), ==, 0xa0dd);
+    qtest_writel(q, PSRAM_CTRL + 0x808, 0);
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x808), ==, 0xa0dd);
+    qtest_writel(q, PSRAM_CTRL + 0x800, 0x22);
+    qtest_system_reset(q);
+    for (unsigned i = 0; i < G_N_ELEMENTS(addresses); i++) {
+        g_assert_cmphex(qtest_readl(q, addresses[i]), ==, 0x12340000 + i);
+    }
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x800), ==, 0x8d09);
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x808), ==, 0xa0dd);
+    qtest_quit(q);
+}
+
+static void psram_invalid_size(const void *opaque)
+{
+    unsigned bytes = GPOINTER_TO_UINT(opaque);
+
+    if (g_test_subprocess()) {
+        g_autofree char *options = g_strdup_printf(
+            "-global venusa-soc.psram-bytes=%u", bytes);
+        QTestState *q = start_options(false, options);
+        qtest_quit(q);
+        return;
+    }
+    g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_failed();
+    g_test_trap_assert_stderr("*VenusA psram-bytes must be "
+                             "8388608 or 16777216*");
 }
 
 static uint32_t command(QTestState *q, unsigned index, uint32_t argument,
@@ -806,7 +861,20 @@ int main(int argc, char **argv)
         qtest_add_data_func(name, &usb_rejections[i], usb_rejected);
     }
     qtest_add_func("venusa/systimer", systimer);
-    qtest_add_func("venusa/psram", psram);
+    qtest_add_data_func("venusa/psram", "", psram);
+    qtest_add_data_func("venusa/psram-8mib",
+                        "-global venusa-soc.psram-bytes=8388608", psram);
+    qtest_add_func("venusa/psram-16mib", psram_16mib);
+    static const unsigned invalid_psram_bytes[] = {
+        0, 1, 4194304, 8388607, 8388609, 16777215, 16777217,
+        33554432, UINT32_MAX,
+    };
+    for (unsigned i = 0; i < G_N_ELEMENTS(invalid_psram_bytes); i++) {
+        g_autofree char *name = g_strdup_printf("venusa/psram-invalid-size/%u",
+                                               invalid_psram_bytes[i]);
+        qtest_add_data_func(name, GUINT_TO_POINTER(invalid_psram_bytes[i]),
+                            psram_invalid_size);
+    }
     qtest_add_func("venusa/sd-transfers", sd_transfers);
     qtest_add_func("venusa/dma-channels", dma_channels);
     qtest_add_func("venusa/dma-descriptor-writeback", dma_descriptor_writeback);

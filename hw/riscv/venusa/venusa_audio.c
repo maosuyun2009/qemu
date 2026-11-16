@@ -315,10 +315,12 @@ static int32_t adc_convert(VenusAAudio *a, unsigned channel, int16_t sample)
     uint32_t analog = a->codec[0x1c / 4], control = a->codec[2];
     unsigned digital = (control >> (channel ? 0 : 7)) & 127;
     unsigned pga = (control >> (channel ? 16 : 21)) & 31;
-    if ((analog & ((1u << bit) | (1u << (bit + 2)) | 16)) != (1u << bit) ||
-        digital < 2) { return 0; }
-    double value = sample * 256.0 * pow(10.0, ((int)pga * 2 - 12 +
-                                              (int)digital - 85) / 20.0);
+    bool dmic = a->codec[0x14 / 4] & 0x400000;
+    if (digital < 2 || (!dmic &&
+        (analog & ((1u << bit) | (1u << (bit + 2)) | 16)) != (1u << bit))) { return 0; }
+    /* The shared PCM scene boundary is after microphone conversion; DMIC bypasses the analog PGA. */
+    int gain = (int)digital - 85 + (dmic ? 0 : (int)pga * 2 - 12);
+    double value = sample * 256.0 * pow(10.0, gain / 20.0);
     /* Functional first-order high-pass response at the documented cutoffs.
      * Analog modulator noise and implementation-specific filter rounding
      * are outside the normalized PCM scene-input model. */
@@ -420,9 +422,14 @@ void venusa_audio_clock(VenusASoC *s)
     configure(&a->clock[0], sr < ARRAY_SIZE(rates) && rates[sr] ?
               UINT64_C(1000000000) * (AUDIO_HZ / rates[sr]) : 0, dac);
     unsigned ar = a->codec[1] & 15;
+    unsigned osr = (a->codec[1] >> 4) & 7;
+    bool dmic = a->codec[0x14 / 4] & 0x400000;
+    /* SDK sc_DMIC_SR_OSR: OSR codes 0..4 mean 500,250,125,100,50. */
+    static const uint8_t dmic_osr[16] = { [0] = 0x0b, [3] = 0x16, [8] = 0x10 };
     bool adc = common && (clocks & (1u << 9)) && (a->codec[0] & 3) == 3 &&
-               (a->codec[1] & 0x180) == 0x180 && !(a->codec[7] & 16);
-    if (adc && ar != 0 && ar != 3 && ar != 8) {
+               (a->codec[1] & 0x180) == 0x180 && (dmic || !(a->codec[7] & 16));
+    if (adc && ((ar != 0 && ar != 3 && ar != 8) ||
+                (dmic && !(dmic_osr[ar] & (1u << osr))))) {
         venusa_fail(s, CODEC_BASE + 4, 4, true, a->codec[1]);
     }
     configure(&a->clock[1],
@@ -574,9 +581,10 @@ static void codec_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
 {
     VenusAAudio *a = opaque;
     if (size != 4 || (off & 3) || off >= sizeof(a->codec)) { goto fail; }
-    /* Digital microphone serial capture, ALC and noise-shaping filters
-     * require separate signal processing models. */
-    if ((off == 0x14 && (value & 0x400000)) ||
+    /* DMIC0 double-edge/latch-90 uses the PCM scene, not a bit-accurate PDM PHY.
+     * Other DMIC sources/timing, auto-reset, ALC and noise-shaping remain unsupported. */
+    if ((off == 0x14 && (value & 0x400000) &&
+         ((value & 0x7f0000) != 0x490000 || (value & 0x0c000000))) ||
         (off == 0x10 && (value & 0x30000)) ||
         (off == 0x0c && (value & 0x4000)) ||
         (off == 0x60 && (value & 0x7f))) { goto fail; }

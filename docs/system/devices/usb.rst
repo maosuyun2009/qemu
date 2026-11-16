@@ -206,6 +206,9 @@ option or the ``device_add`` monitor command. Available devices are:
 ``usb-audio``
    USB audio device
 
+``usb-uvc,image=path``
+   :doc:`listenai-uvc`
+
 ``u2f-{emulated,passthru}``
    :doc:`usb-u2f`
 

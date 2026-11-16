@@ -118,12 +118,14 @@ bool gc0328_frame_info(DeviceState *dev, unsigned *width, unsigned *height,
                    r[0x44], r[0x18], r[0x59], r[0x5a], r[0x4c]);
         return false;
     }
-    *width = r[0x50] & 1 ? pair(s, 0x57) : 640;
-    *height = r[0x50] & 1 ? pair(s, 0x55) : 480;
+    unsigned step = half ? 2 : 1;
+    /* Crop coordinates/dimensions are in the post-subsampling raster. */
+    *width = r[0x50] & 1 ? pair(s, 0x57) : 640 / step;
+    *height = r[0x50] & 1 ? pair(s, 0x55) : 480 / step;
     unsigned x = r[0x50] & 1 ? pair(s, 0x53) : 0;
     unsigned y = r[0x50] & 1 ? pair(s, 0x51) : 0;
-    if (!*width || !*height || (*width & (half ? 3 : 1)) ||
-        (half && (*height & 1)) || x + *width > 640 || y + *height > 480) {
+    if (!*width || !*height || (*width & 1) ||
+        x + *width > 640 / step || y + *height > 480 / step) {
         error_setg(errp, "Unsupported GC0328 crop window"); return false;
     }
     *bpp = 2;
@@ -136,12 +138,8 @@ bool gc0328_frame_info(DeviceState *dev, unsigned *width, unsigned *height,
     *line_clocks = row_clocks * (half ? 2 : 1);
     /* Subsampling keeps the readout frame period. Only 0x5a[0]
      * extends the output PCLK over the skipped column. */
-    if (half) {
-        *width /= 2;
-        *height /= 2;
-        if (r[0x5a] & 1) {
-            *pixel_clocks *= 2;
-        }
+    if (half && (r[0x5a] & 1)) {
+        *pixel_clocks *= 2;
     }
     memcpy(s->frame_regs, r, sizeof(s->frame_regs));
     memcpy(s->frame_rgb, s->rgb, sizeof(s->frame_rgb));
@@ -152,10 +150,10 @@ bool gc0328_frame_info(DeviceState *dev, unsigned *width, unsigned *height,
 static void rgb(GC0328State *s, unsigned x, unsigned y, int *r, int *g, int *b)
 {
     unsigned step = s->frame_regs[0x59] == 0x22 ? 2 : 1;
-    x *= step;
-    y *= step;
     x += (s->frame_regs[0x50] & 1) ? ((s->frame_regs[0x53] << 8) | s->frame_regs[0x54]) : 0;
     y += (s->frame_regs[0x50] & 1) ? ((s->frame_regs[0x51] << 8) | s->frame_regs[0x52]) : 0;
+    x *= step;
+    y *= step;
     /* The optical input is calibrated RGB after the ideal ISP. Neighbor
      * averaging is applied before RGB565/YUV packing, not to packed bytes. */
     unsigned sum[3] = {0};

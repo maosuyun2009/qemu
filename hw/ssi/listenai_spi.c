@@ -264,6 +264,7 @@ static void serial_complete(ListenaiSPI *s)
         }
         if (slave) {
             s->regs[0x64 / 4]++;
+            s->slave_rx_frames++;
         }
     }
     if (s->mode != 2) {
@@ -734,7 +735,7 @@ static void spi_reset_state(ListenaiSPI *s)
     memset(s->regs, 0, sizeof(s->regs));
     s->head = s->count = s->rx_head = s->rx_count = s->pending = 0;
     s->mode = 1;
-    s->remaining = s->frames = 0;
+    s->remaining = s->frames = s->slave_rx_frames = 0;
     s->active = s->phase = s->serial = s->selected = false;
     s->pin_clock = s->pin_data = false;
     s->pin_cs = true;

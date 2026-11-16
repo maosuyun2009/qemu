@@ -17,11 +17,25 @@ typedef struct VenusADMA2DCallbacks {
 
 typedef struct VenusADMA2DDescriptor {
     uint32_t control, src, dst, length, irq_enable, block_mask;
+    uint32_t sg_num, sg_itv, ds_num, ds_itv;
+    uint32_t jpeg_width, jpeg_stride;
+    uint16_t in_width, in_height, out_width, out_height;
+    uint16_t in_stride, out_stride, phase_x, phase_y;
+    uint16_t start_x, start_y;
+    uint8_t in_format, out_format, in_yuv;
+    uint8_t merge_x, merge_y;
+    bool scaler, converter, in_rgb, out_rgb, last_tile, last_band;
 } VenusADMA2DDescriptor;
 
 typedef struct VenusADMA2DChannel {
     VenusADMA2DDescriptor working, queued;
     uint32_t transferred, raw, src_cursor, dst_cursor;
+    uint8_t scaler_pixel[3];
+    uint8_t packed[4], packed_left, packed_pos;
+    uint8_t image_pending[8], image_pending_len, image_pending_pos;
+    uint8_t image_stream[8], image_stream_len;
+    uint32_t image_pending_dst;
+    uint32_t image_pixels, image_in_bytes, image_out_bytes;
     bool active, pending;
 } VenusADMA2DChannel;
 

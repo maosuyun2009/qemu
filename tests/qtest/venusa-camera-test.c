@@ -4,7 +4,8 @@
 #include "qapi/error.h"
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
-#define I2C 0x43c00000
+static uint32_t i2c_base = 0x43c00000;
+#define I2C i2c_base
 #define DVP 0x42000800
 #define FIFO 0x42001000
 static char *flash, *scene;
@@ -47,11 +48,15 @@ static void reg(QTestState *q, uint8_t address, uint8_t value)
     qtest_writel(q,I2C+0x28,1);qtest_clock_step(q,1000000);
     g_assert_cmphex(qtest_readl(q,I2C+0x18)&0x600,==,0x600);
 }
-static void pixels(void)
+static void pixels(const void *opaque)
 {
+    unsigned bus=GPOINTER_TO_UINT(opaque);
+    i2c_base=0x43b00000+bus*0x100000;
     g_autofree char *f=g_shell_quote(flash),*p=g_shell_quote(scene);
-    QTestState *q=qtest_initf("-machine venusa-rd-evb -drive if=pflash,format=raw,file=%s -device venusa-gc0328-camera,soc=/machine/soc,file=%s",f,p);
-    qtest_writel(q,0x43100034,0x802);
+    QTestState *q=qtest_initf("-machine venusa-rd-evb -drive if=pflash,format=raw,file=%s -device venusa-gc0328-camera,soc=/machine/soc,file=%s,i2c-bus=%u",f,p,bus);
+    qtest_writel(q,0x43100034,0x800|(1u<<bus));
+    qtest_writel(q,0x44100000+(bus ? 34 : 19)*4,bus ? 8 : 7);
+    qtest_writel(q,0x44100000+(bus ? 33 : 20)*4,bus ? 8 : 7);
     for(unsigned i=21;i<=31;i++)qtest_writel(q,0x44100000+i*4,13);
     qtest_writel(q,0x44100000+35*4,13);
     qtest_writel(q,0x43100028,0x20000|(24<<7));
@@ -82,6 +87,48 @@ static void pixels(void)
     g_assert_cmphex(qtest_readl(q,DVP+0x34),==,0x10);
     qtest_quit(q);
 }
+static void post_subsample_crop(void)
+{
+    g_autofree char *f=g_shell_quote(flash), *p=g_shell_quote(scene);
+    QTestState *q=qtest_initf("-machine venusa-rd-evb -drive if=pflash,format=raw,file=%s "
+        "-device venusa-gc0328-camera,id=camera,soc=/machine/soc,file=%s",f,p);
+    i2c_base=0x43c00000;
+    qtest_writel(q,0x43100034,0x802);
+    for (unsigned i=21;i<=31;i++) { qtest_writel(q,0x44100000+i*4,13); }
+    qtest_writel(q,0x44100000+33*4,8); qtest_writel(q,0x44100000+34*4,8);
+    qtest_writel(q,0x44100000+35*4,13);
+    qtest_writel(q,0x43100028,0x30000|(24<<7));
+    qtest_writel(q,I2C+0x2c,5|(200<<4));
+    reg(q,0xf2,0); reg(q,0x50,1);
+    reg(q,0x55,0); reg(q,0x56,240); reg(q,0x57,1); reg(q,0x58,64);
+    reg(q,0x59,0x22); reg(q,0x5a,0x0e);
+    for (unsigned i=0x5b;i<=0x62;i++) { reg(q,i,0); }
+    reg(q,0xf2,1);
+    g_autoptr(QDict) result=qtest_qmp(q,"{'execute':'qom-get','arguments':"
+        "{'path':'/machine/peripheral/camera','property':'x-lisem-camera-timing'}}");
+    QObject *obj=qobject_from_json(qdict_get_str(result,"return"),&error_abort);
+    QDict *timing=qobject_to(QDict,obj);
+    g_assert_cmpuint(qdict_get_int(timing,"width"),==,320);
+    g_assert_cmpuint(qdict_get_int(timing,"height"),==,240);
+    qobject_unref(obj); qtest_quit(q);
+}
+static void reject_unrouted_sccb(void)
+{
+    if (g_test_subprocess()) {
+        g_autofree char *f=g_shell_quote(flash), *p=g_shell_quote(scene);
+        QTestState *q=qtest_initf("-machine venusa-rd-evb -drive if=pflash,format=raw,file=%s "
+            "-device venusa-gc0328-camera,soc=/machine/soc,file=%s",f,p);
+        i2c_base=0x43c00000;
+        qtest_writel(q,0x43100034,2);
+        qtest_writel(q,0x44100000+35*4,13);
+        qtest_writel(q,0x43100028,0x30000|(24<<7));
+        qtest_writel(q,I2C+0x2c,5|(200<<4));
+        reg(q,0xf2,0); qtest_quit(q); return;
+    }
+    g_test_trap_subprocess(NULL,5*G_USEC_PER_SEC,0);
+    g_test_trap_assert_failed();
+    g_test_trap_assert_stderr("*VenusA unsupported write*");
+}
 int main(int argc,char**argv){
     g_test_init(&argc,&argv,NULL);
     int fd=g_file_open_tmp("venusa-camera-flash-XXXXXX",&flash,NULL);
@@ -92,7 +139,10 @@ int main(int argc,char**argv){
         data[(y*640+x)*3]=x*40;data[(y*640+x)*3+1]=y*40;data[(y*640+x)*3+2]=56;
     }
     g_assert_cmpint(write(fd,data,640*480*3),==,640*480*3);close(fd);g_free(data);
-    qtest_add_func("venusa/camera/sccb-pixels-clock",pixels);
+    qtest_add_data_func("venusa/camera/sccb-pixels-clock",GUINT_TO_POINTER(1),pixels);
+    qtest_add_data_func("venusa/camera/sccb0-pixels-clock",GUINT_TO_POINTER(0),pixels);
     qtest_add_func("venusa/camera/repeated-clock-load",load_pulses);
+    qtest_add_func("venusa/camera/reject-unrouted-sccb",reject_unrouted_sccb);
+    qtest_add_func("venusa/camera/post-subsample-crop",post_subsample_crop);
     int r=g_test_run();unlink(flash);unlink(scene);g_free(flash);g_free(scene);return r;
 }

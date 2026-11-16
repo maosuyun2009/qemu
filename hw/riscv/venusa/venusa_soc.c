@@ -207,6 +207,10 @@ static void realize(DeviceState *dev, Error **errp)
         { "venusa-sram", 0x20000000, 0x80000 },
         { "venusa-luna-private", 0x20080000, 0x20000 },
     };
+    if (s->psram_bytes != 8 * MiB && s->psram_bytes != 16 * MiB) {
+        error_setg(errp, "VenusA psram-bytes must be 8388608 or 16777216");
+        return;
+    }
     memory_region_init_io(&s->io, OBJECT(s), &io_ops, s, "venusa-strict-mmio", UINT64_C(0x100000000));
     /* Peripheral DMA can synchronously access UART FIFO registers. */
     s->io.disable_reentrancy_guard = true;
@@ -271,6 +275,7 @@ static void realize(DeviceState *dev, Error **errp)
 }
 
 static const Property properties[] = {
+    DEFINE_PROP_UINT32("psram-bytes", VenusASoC, psram_bytes, 8 * MiB),
     DEFINE_PROP_UINT32("flash-bytes", VenusASoC, flash_bytes, LISTENAI_NOR_SIZE),
     DEFINE_PROP_DRIVE("flash", VenusASoC, flash),
 };

@@ -16,19 +16,20 @@ void venusa_dvp_dma_update(VenusASoC *s)
 {
     VenusADVP *d = &s->dvp;
     uint32_t mux = s->syscfg[0xa0 / 4];
-    if (!(mux & (1u << 3))) { return; }
-    bool route = (mux & (1u << 15)) && (mux & (1u << 19));
+    bool route = (mux & (1u << 3)) && (mux & (1u << 15)) && (mux & (1u << 19));
     if (d->count && (R(0x20) & 0x80)) { d->request = true; }
     if (d->count >= MAX(1, R(0x20) & 0x7f) && (R(0x20) & 0x100)) {
         d->request = true;
     }
-    if (!d->count) { d->request = false; }
+    if (!d->count || !(R(0x20) & 0x180)) { d->request = false; }
     listenai_dma_request(&s->dma, 3, route && d->clock && (R(0x1c) & 1) && d->request);
+    venusa_dma2d_request(&s->dma2d);
 }
 static unsigned bytes_per_pixel(VenusADVP *d)
 {
     switch (R(0x18)) {
-    case 0: case 0xc: return 2;
+    case 0: case 0x8: case 0xc: return 2;
+    case 0x4: case 0x10: return 3;
     case 0x14: return 1;
     default: venusa_fail(d->soc, BASE + 0x18, 4, true, R(0x18));
     }
@@ -50,12 +51,13 @@ static void push(VenusADVP *d, uint8_t byte)
 static void sample(VenusADVP *d)
 {
     if (!d->clock || !(R(0x1c) & 1)) { return; }
+    uint32_t previous_status = R(0x34);
     bool vsync = !!d->input[0] ^ !!(R(0x10) & 8);
     bool hsync = !!d->input[1] ^ !!(R(0x10) & 4);
     if (vsync && !d->last_vsync) {
         if (d->frame) {
             R(0x34) |= 0x40;
-            if (d->line < R(0xc) + R(4)) { R(0x34) |= 0x100; }
+            if (d->line < R(0xc) + R(4)) { R(0x34) |= 0x100; d->short_frames++; }
         }
         d->frame = true;
         d->line = d->byte = d->packed = d->word = 0;
@@ -64,7 +66,7 @@ static void sample(VenusADVP *d)
     }
     if (d->last_hsync && !hsync && d->frame) {
         unsigned bpp = bytes_per_pixel(d);
-        if (d->byte < (R(8) + R(0)) * bpp) { R(0x34) |= 0x800; }
+        if (d->byte < (R(8) + R(0)) * bpp) { R(0x34) |= 0x800; d->short_lines++; }
         d->line++; d->byte = 0;
         if (d->line == R(0xc) + R(4)) { R(0x34) |= 0x40; }
     }
@@ -78,11 +80,13 @@ static void sample(VenusADVP *d)
             push(d, d->input[3]); d->samples++;
             if (d->line + 1 == R(0xc) + R(4) && d->byte + 1 == end) {
                 R(0x34) |= 0x200;
+                d->captured_frames++;
             }
         }
         d->byte++;
     }
-    signals(d);
+    /* push() notifies each completed FIFO word; partial bytes need no DMA wakeup. */
+    if (R(0x34) != previous_status) { signals(d); }
 }
 static void input(void *opaque, int pin, int value)
 {
@@ -139,7 +143,8 @@ static void dvp_write(void *opaque, hwaddr off, uint64_t value, unsigned size)
         if (value & ~1u) { goto unsupported; }
         if (value & 1) { d->head = d->count = d->word = d->packed = d->byte = d->line = 0; d->frame = d->request = false; R(0x34) = 0x10; signals(d); } return;
     case 0x18:
-        if (value != 0 && value != 0xc && value != 0x14) { goto unsupported; } break;
+        if (value != 0 && value != 0x4 && value != 0x8 && value != 0xc &&
+            value != 0x10 && value != 0x14) { goto unsupported; } break;
     case 0x1c:
         if (value & ~1u) { goto unsupported; }
         if (value && (!R(0) || !R(4) || (R(0) * bytes_per_pixel(d)) % 4)) { goto unsupported; }

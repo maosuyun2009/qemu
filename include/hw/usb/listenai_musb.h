@@ -3,17 +3,26 @@
 #define HW_USB_LISTENAI_MUSB_H
 
 #include "hw/sysbus.h"
+#include "hw/usb.h"
+#include "qemu/timer.h"
 
 #define TYPE_LISTENAI_MUSB "listenai-musb-empty-host"
 OBJECT_DECLARE_SIMPLE_TYPE(ListenAIMUSB, LISTENAI_MUSB)
 
-/* Init-only MUSB host with an empty port; no USB bus or transfer engine. */
+/* Eight-pipe MUSB host, with a single direct-attached USB port. */
 struct ListenAIMUSB {
     SysBusDevice parent_obj;
     MemoryRegion io;
     qemu_irq irq;
-    uint8_t power, index, session, usb_ie;
-    uint16_t tx_ie, rx_ie;
+    USBBus bus;
+    USBPort port;
+    QEMUTimer *timer;
+    uint8_t power, index, session, usb_ie, usb_is, address;
+    uint16_t tx_ie, rx_ie, tx_is, rx_is;
+    uint8_t endpoint[8][16], target[8][8];
+    uint8_t fifo[8][2048];
+    uint16_t count[8], position[8], tx_count[8];
+    bool connected, port_enabled;
     uint8_t fifo_size[8][2];
     uint16_t fifo_addr[8][2];
     bool clock_enabled, iddig, utmi16;

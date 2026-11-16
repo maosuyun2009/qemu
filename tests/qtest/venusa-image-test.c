@@ -77,6 +77,53 @@ static void cancel_gate(void)
     g_assert_cmphex(qtest_readl(q, RAM + 0x108), ==, 0);
     qtest_quit(q);
 }
+static void dma2d_m2m_yuyv_to_bgr(void)
+{
+    QTestState *q = start();
+    const uint8_t input[] = { 80, 100, 180, 160, 0xee, 0xee };
+    const uint8_t expected[] = { 31, 66, 124, 131, 166, 224, 0xa5, 0xa5 };
+    uint8_t actual[sizeof(expected)];
+
+    qtest_memwrite(q, RAM, input, sizeof(input));
+    memset(actual, 0xa5, sizeof(actual));
+    qtest_memwrite(q, RAM + 0x1000, actual, sizeof(actual));
+    qtest_writel(q, DMA + 4 * 4, 1 | (2u << 1) | (2u << 3) |
+                 (2u << 5) | (1u << 23)); /* One word per grant splits the last pixel. */
+    qtest_writel(q, DMA + 0x220 + 4 * 4, 1);
+    qtest_writel(q, DMA + 0x100 + 4 * 4, 3); /* YUYV422 -> BGR888. */
+    qtest_writel(q, DMA + 0x120 + 4 * 4, 2 | (1u << 16));
+    qtest_writel(q, DMA + 0x140 + 4 * 4, 2 | (1u << 16));
+    qtest_writel(q, DMA + 0x160 + 4 * 4, 6 | (8u << 16));
+    descriptor(q, 4, RAM, RAM + 0x1000, 4); /* Non-scaling image length counts input bytes. */
+    qtest_clock_step(q, 100000);
+    qtest_memread(q, RAM + 0x1000, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    g_assert_cmpuint(qtest_readl(q, DMA + 0x340 + 4 * 4), ==, 1);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x280 + 4 * 4) & 1, ==, 1);
+    qtest_quit(q);
+}
+
+static void jpeg_waits_for_pixels(void)
+{
+    QTestState *q = start();
+    const unsigned ch = 2;
+    qtest_writel(q, 0x42001804, 1); /* Pixel output is a decoder request. */
+    const uint32_t ctrl = 1 | (2u << 3) | (2u << 5) | (2u << 8) | (5u << 28);
+
+    qtest_writel(q, RAM, 0x76543210);
+    qtest_writel(q, DMA + ch * 4, ctrl);
+    qtest_writel(q, DMA + 0x220 + ch * 4, 1);
+    descriptor(q, ch, 0x42002800, RAM, 4);
+    qtest_clock_step(q, 1000000);
+    g_assert_cmphex(qtest_readl(q, RAM), ==, 0x76543210);
+    g_assert_cmpuint(qtest_readl(q, DMA + 0x320 + ch * 4), ==, 4);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x280 + ch * 4) & 1, ==, 0);
+    qtest_writel(q, DMA + 0x360, 1u << ch);
+    qtest_clock_step(q, 1000000);
+    g_assert_cmphex(qtest_readl(q, RAM), ==, 0x76543210);
+    qtest_quit(q);
+}
+
 static void rgb_pixels(void)
 {
     QTestState *q = start();
@@ -308,6 +355,185 @@ static void narrow_and_address_modes(void)
     }
     qtest_quit(q);
 }
+static void mixed_width_copy(void)
+{
+    QTestState *q = start();
+    uint8_t source[67], actual[71], expected[71];
+    for (unsigned i = 0; i < sizeof(source); i++) { source[i] = i + 17; }
+    memset(expected, 0xa5, sizeof(expected));
+    qtest_memwrite(q, RAM + 1, source, sizeof(source));
+    qtest_memwrite(q, 0x38801000, expected, sizeof(expected));
+    /* Literal programmed by luna_api_gpdma_start: byte source, word output. */
+    qtest_writel(q, DMA + 20, 0x0019e0c5);
+    qtest_writel(q, DMA + 0x220 + 20, 1);
+    descriptor(q, 5, RAM + 1, 0x38801000, sizeof(source));
+    qtest_memread(q, 0x38001000, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    qtest_clock_step(q, 100000);
+    memcpy(expected, source, sizeof(source));
+    qtest_memread(q, 0x38001000, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    g_assert_cmphex(qtest_readl(q, DMA + 0x280 + 20) & 1, ==, 1);
+    g_assert_cmpuint(qtest_readb(q, 0xe0021000 + 54 * 4), ==, 1);
+    qtest_quit(q);
+}
+static void strided_copy(void)
+{
+    QTestState *q = start();
+    uint8_t source[256], actual[256], expected[256];
+    for (unsigned i = 0; i < sizeof(source); i++) { source[i] = i ^ 0x69; }
+    /* SG/DS are independent byte counters; both final groups are partial. */
+    for (unsigned enables = 1; enables < 4; enables++) {
+        unsigned sg = enables & 1 ? 5 : 256, ds = enables & 2 ? 12 : 256;
+        memset(expected, 0xa5, sizeof(expected));
+        qtest_memwrite(q, RAM, source, sizeof(source));
+        qtest_memwrite(q, 0x38802000, expected, sizeof(expected));
+        qtest_writel(q, DMA, 0x0019e0c5 |
+                     (enables & 1 ? 1u << 22 : 0) |
+                     (enables & 2 ? 1u << 21 : 0));
+        qtest_writel(q, DMA + 0x20, 5);
+        qtest_writel(q, DMA + 0x40, 3);
+        qtest_writel(q, DMA + 0x60, 12);
+        qtest_writel(q, DMA + 0x80, 8);
+        descriptor(q, 0, RAM, 0x38802000, 67);
+        qtest_clock_step(q, 100000);
+        for (unsigned i = 0; i < 67; i++) {
+            expected[i + i / ds * 8] = source[i + i / sg * 3];
+        }
+        qtest_memread(q, 0x38002000, actual, sizeof(actual));
+        g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+        qtest_memread(q, RAM, actual, sizeof(actual));
+        g_assert_cmpmem(actual, sizeof(actual), source, sizeof(source));
+    }
+    qtest_quit(q);
+}
+static void strided_shadow_clock_cancel(void)
+{
+    QTestState *q = start();
+    uint8_t source[256], actual[128], expected[128];
+    for (unsigned i = 0; i < sizeof(source); i++) { source[i] = i + 1; }
+    memset(expected, 0xa5, sizeof(expected));
+    qtest_memwrite(q, RAM, source, sizeof(source));
+    qtest_memwrite(q, RAM + 0x1000, expected, sizeof(expected));
+    qtest_memwrite(q, RAM + 0x2000, expected, sizeof(expected));
+    qtest_writel(q, DMA, 0x0079e0c5);
+    qtest_writel(q, DMA + 0x220, 1);
+    qtest_writel(q, DMA + 0x20, 5);
+    qtest_writel(q, DMA + 0x40, 3);
+    qtest_writel(q, DMA + 0x60, 12);
+    qtest_writel(q, DMA + 0x80, 8);
+    descriptor(q, 0, RAM, RAM + 0x1000, 67);
+    /* Queue a differently packed/strided block while the first is active. */
+    qtest_writel(q, DMA, (0x0079e0c5 & ~0x78u) | (2u << 3));
+    qtest_writel(q, DMA + 0x20, 8);
+    qtest_writel(q, DMA + 0x40, 4);
+    qtest_writel(q, DMA + 0x60, 3);
+    qtest_writel(q, DMA + 0x80, 2);
+    descriptor(q, 0, RAM, RAM + 0x2000, 9);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x3c0), ==, 3);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x3e0), ==, 0x80000005);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x400), ==, 8);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x420), ==, 0x8000000c);
+    qtest_clock_step(q, 1000); /* One 16-word grant, not 16 source bytes. */
+    g_assert_cmpuint(qtest_readl(q, DMA + 0x320), ==, 3);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x280) & 1, ==, 0);
+    for (unsigned i = 0; i < 64; i++) {
+        expected[i + i / 12 * 8] = source[i + i / 5 * 3];
+    }
+    qtest_memread(q, RAM + 0x1000, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    qtest_writel(q, 0x43100034, qtest_readl(q, 0x43100034) & ~16u);
+    qtest_clock_step(q, 100000);
+    g_assert_cmpuint(qtest_readl(q, DMA + 0x320), ==, 3);
+    qtest_writel(q, 0x43100034, qtest_readl(q, 0x43100034) | 16);
+    qtest_clock_step(q, 1000);
+    g_assert_cmpuint(qtest_readl(q, DMA + 0x320), ==, 9);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x3c0), ==, 4);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x3e0), ==, 0x80000008);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x400), ==, 2);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x420), ==, 0x80000003);
+    /* Live control writes must not alter the queued descriptor's packing. */
+    qtest_writel(q, DMA, 0x0019e0c5);
+    qtest_clock_step(q, 100000);
+    for (unsigned i = 64; i < 67; i++) {
+        expected[i + i / 12 * 8] = source[i + i / 5 * 3];
+    }
+    qtest_memread(q, RAM + 0x1000, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    memset(expected, 0xa5, sizeof(expected));
+    for (unsigned i = 0; i < 9; i++) {
+        expected[i + i / 3 * 2] = source[i + i / 8 * 4];
+    }
+    qtest_memread(q, RAM + 0x2000, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    g_assert_cmpuint(qtest_readb(q, 0xe0021000 + 49 * 4), ==, 1);
+    qtest_writel(q, DMA + 0x260, 31);
+    qtest_writel(q, DMA, 0x0079e0c5);
+    qtest_writel(q, DMA + 0x60, 12);
+    qtest_writel(q, DMA + 0x80, 8);
+    descriptor(q, 0, RAM, RAM + 0x3000, 67);
+    descriptor(q, 0, RAM, RAM + 0x4000, 67);
+    qtest_clock_step(q, 1000);
+    g_assert_cmpuint(qtest_readl(q, DMA + 0x320), ==, 3);
+    qtest_writel(q, DMA + 0x360, 1);
+    qtest_clock_step(q, 100000);
+    g_assert_cmphex(qtest_readl(q, RAM + 0x3000), ==, 0x04030201);
+    g_assert_cmphex(qtest_readl(q, RAM + 0x3000 + 104), ==, 0);
+    g_assert_cmphex(qtest_readl(q, RAM + 0x4000), ==, 0);
+    g_assert_cmpuint(qtest_readl(q, DMA + 0x200), ==, 0);
+    g_assert_cmphex(qtest_readl(q, DMA + 0x280) & 17, ==, 16);
+    qtest_quit(q);
+}
+
+static void mixed_width_matrix(void)
+{
+    QTestState *q = start();
+    uint8_t source[64], actual[64], expected[64];
+    for (unsigned i = 0; i < sizeof(source); i++) { source[i] = i + 1; }
+    qtest_memwrite(q, RAM, source, sizeof(source));
+    for (unsigned sw = 0; sw < 3; sw++) {
+        for (unsigned dw = 0; dw < 3; dw++) {
+            for (unsigned mode = 0; mode < 4; mode++) {
+                unsigned su = 1u << sw, du = 1u << dw;
+                unsigned sm = mode == 1 ? 1 : mode == 2 ? 2 : 0;
+                unsigned dm = mode == 3 ? 2 : 0;
+                memset(expected, 0xa5, sizeof(expected));
+                qtest_memwrite(q, RAM + 0x1000, expected, sizeof(expected));
+                qtest_writel(q, DMA, 5 | sw << 3 | dw << 5 | sm << 8 | dm << 10);
+                descriptor(q, 0, RAM + 32, RAM + 0x1000, 19);
+                qtest_clock_step(q, 100000);
+                for (unsigned i = 0; i < 19; i++) {
+                    unsigned src = sm == 1 ? 32 - i / su * su + i % su :
+                                   sm == 2 ? 32 + i % su : 32 + i;
+                    unsigned dst = dm == 2 ? i % du : i;
+                    expected[dst] = source[src];
+                }
+                qtest_memread(q, RAM + 0x1000, actual, sizeof(actual));
+                g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+            }
+        }
+    }
+    qtest_quit(q);
+}
+
+static void alias_overlap_order(void)
+{
+    QTestState *q = start();
+    uint8_t source[64], expected[64], actual[64];
+    for (unsigned i = 0; i < sizeof(source); i++) { source[i] = i + 1; }
+    memcpy(expected, source, sizeof(source));
+    qtest_memwrite(q, 0x38002000, source, sizeof(source));
+    qtest_writel(q, DMA, 0x0019e0c5);
+    descriptor(q, 0, 0x38802000, 0x38002004, 19);
+    for (unsigned i = 0; i < 19; i += 4) {
+        unsigned n = MIN(4, 19 - i);
+        memcpy(expected + i + 4, expected + i, n);
+    }
+    qtest_clock_step(q, 100000);
+    qtest_memread(q, 0x38002000, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    qtest_quit(q);
+}
 static void psram_alias(void)
 {
     QTestState *q = start();
@@ -357,9 +583,114 @@ static void rgb_format_capacity(void)
     }
     qtest_quit(q);
 }
+typedef struct NormalRejected {
+    const char *name;
+    uint32_t bank, value, control;
+} NormalRejected;
+static const NormalRejected converter_rejected[] = {
+    { "format", 0x100, 0x33 },
+    { "geometry-reserved", 0x120, 0x08010002 },
+    { "stride-reserved", 0x160, 0x40080006 },
+    { "length", 0xe0, 8 },
+    { "decrement", 0, CTRL_COPY | (1u << 23) | (1u << 8) },
+    { "alias", 0xc0, RAM },
+    { "output-span", 0xc0, 0x20085ffc },
+};
+static void reject_converter(const void *opaque)
+{
+    const NormalRejected *r = opaque;
+    if (g_test_subprocess()) {
+        QTestState *q = start();
+        const unsigned ch = 4;
+        qtest_set_expected_status(q, 1);
+        qtest_writel(q, DMA + ch * 4, CTRL_COPY | (1u << 23));
+        qtest_writel(q, DMA + 0x100 + ch * 4, 3);
+        qtest_writel(q, DMA + 0x120 + ch * 4, 0x00010002);
+        qtest_writel(q, DMA + 0x140 + ch * 4, 0x00010002);
+        qtest_writel(q, DMA + 0x160 + ch * 4, 0x00080006);
+        qtest_writel(q, DMA + 0xa0 + ch * 4, RAM);
+        qtest_writel(q, DMA + 0xc0 + ch * 4, RAM + 0x1000);
+        qtest_writel(q, DMA + 0xe0 + ch * 4, 4);
+        qtest_writel(q, DMA + r->bank + ch * 4, r->value);
+        qtest_writel(q, DMA + 0x200 + ch * 4, 1);
+        qtest_quit(q);
+        return;
+    }
+    g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_failed();
+    g_test_trap_assert_stderr("*VenusA unsupported write*");
+}
+static const NormalRejected normal_rejected[] = {
+    { "sg-zero", 0x20, 0 },
+    { "ds-zero", 0x60, 0 },
+    { "sg-count-24bit", 0x20, 0x1000000 },
+    { "ds-count-24bit", 0x60, 0x1000000 },
+    { "sg-gap-24bit", 0x40, 0x1000000 },
+    { "ds-gap-24bit", 0x80, 0x1000000 },
+    { "sg-count-alignment", 0x20, 6, 0x0079e0d5 },
+    { "sg-gap-alignment", 0x40, 2, 0x0079e0d5 },
+    { "ds-count-alignment", 0x60, 6 },
+    { "ds-gap-alignment", 0x80, 2 },
+    { "sg-decrement", 0, 0x0079e1c5 },
+    { "ds-fixed", 0, 0x0079e8c5 },
+    { "peripheral-sg", 0, CTRL_RGB | (1u << 22) },
+    { "peripheral-unequal", 0, CTRL_RGB & ~(3u << 3) },
+    { "image-sg", 0, CTRL_COPY | (1u << 23) | (1u << 22) },
+    { "invalid-width", 0, 0x0019e0dd },
+    { "src-span", 0xa0, 0x20085ffc },
+    { "dst-span", 0xc0, 0x20085ffc },
+    { "src-overflow", 0xa0, 0xfffffffc },
+    { "dst-overflow", 0xc0, 0xfffffffc },
+    { "stride-overflow", 0x40, 0xffffff },
+    { "src-decrement-underflow", 0, 0x0019e1c5 },
+    { "src-alignment", 0xa0, RAM + 1, 0x0079e0d5 },
+    { "dst-alignment", 0xc0, RAM + 0x1001 },
+    { "pending-sg-metadata", 0x20, 16, 0x0079e0c5 },
+};
+static void reject_normal(const void *opaque)
+{
+    const NormalRejected *r = opaque;
+    if (g_test_subprocess()) {
+        QTestState *q = start();
+        qtest_set_expected_status(q, 1);
+        qtest_writel(q, DMA, r->control ? r->control : 0x0079e0c5);
+        qtest_writel(q, DMA + 0x20, 8);
+        qtest_writel(q, DMA + 0x40, 4);
+        qtest_writel(q, DMA + 0x60, 12);
+        qtest_writel(q, DMA + 0x80, 8);
+        qtest_writel(q, DMA + 0xa0, RAM);
+        qtest_writel(q, DMA + 0xc0, RAM + 0x1000);
+        qtest_writel(q, DMA + 0xe0, 67);
+        if (!strcmp(r->name, "image-sg")) {
+            qtest_writel(q, DMA + 0x100, 0x44);
+            qtest_writel(q, DMA + 0x120, 0x00010004);
+            qtest_writel(q, DMA + 0x140, 0x00010004);
+            qtest_writel(q, DMA + 0x160, 0x00040004);
+            qtest_writel(q, DMA + 0x4f0, 1);
+            qtest_writel(q, DMA + 0xe0, 4);
+        }
+        if (!strcmp(r->name, "src-decrement-underflow")) {
+            qtest_writel(q, DMA + 0xa0, 0);
+        }
+        if (!strcmp(r->name, "stride-overflow")) {
+            qtest_writel(q, DMA + 0xe0, 0xffffff);
+        }
+        if (!strcmp(r->name, "pending-sg-metadata")) {
+            qtest_writel(q, DMA + 0x200, 1);
+            qtest_writel(q, DMA + 0x200, 1);
+        }
+        qtest_writel(q, DMA + r->bank, r->value);
+        qtest_writel(q, DMA + 0x200, 1);
+        /* Rejection must happen at queue time, before even the first grant. */
+        qtest_quit(q); return;
+    }
+    g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_failed();
+    g_test_trap_assert_stderr("*VenusA unsupported write*");
+}
 typedef struct Rejected { const char *name; uint32_t address, value; } Rejected;
 static const Rejected rejected[] = {
-    { "image-mode", DMA + 0x100, 1 },
+    { "channel1-image-mode", DMA + 0x104, 1 },
     { "outside-memory", DMA + 0x200, 1 },
     { "command-fifo", DMA + 0x4c4, 16 },
     { "read-only-status", DMA + 0x280, 1 },
@@ -396,6 +727,54 @@ static void reject(const void *opaque)
     g_test_trap_assert_failed();
     g_test_trap_assert_stderr("*VenusA unsupported write*");
 }
+static void jpeg_encode_waits(void)
+{
+    QTestState *q = start();
+    qtest_writel(q, RAM, 0x76543210);
+    qtest_writel(q, RAM + 4, 0xa5a5a5a5);
+    /* Reset selects encode. No codec start or pixel input means no requests. */
+    qtest_writel(q, DMA + 4, 1 | (2 << 3) | (2 << 5) | (2 << 8) |
+                             (1 << 17) | (4u << 28));
+    descriptor(q, 1, 0x42003000, RAM + 4, 64);
+    qtest_writel(q, DMA + 8, 1 | (1 << 1) | (2 << 3) | (2 << 5) |
+                             (2 << 10) | (1 << 17) | (5u << 28));
+    descriptor(q, 2, RAM, 0x42002800, 64);
+    qtest_clock_step(q, 1000000);
+    g_assert_cmphex(qtest_readl(q, RAM), ==, 0x76543210);
+    g_assert_cmphex(qtest_readl(q, RAM + 4), ==, 0xa5a5a5a5);
+    for (unsigned ch = 1; ch <= 2; ch++) {
+        g_assert_cmpuint(qtest_readl(q, DMA + 0x320 + ch * 4), ==, 64);
+        g_assert_cmphex(qtest_readl(q, DMA + 0x280 + ch * 4) & 1, ==, 0);
+    }
+    qtest_writel(q, DMA + 0x360, 6);
+    qtest_quit(q);
+}
+
+static void jpeg_reject_route(gconstpointer opaque)
+{
+    unsigned which = GPOINTER_TO_UINT(opaque);
+    if (g_test_subprocess()) {
+        QTestState *q = start();
+        qtest_set_expected_status(q, 1);
+        if (which == 0 || which == 1) {
+            /* DMA2D and common-DMA mux fields must both select JPEG. */
+            qtest_writel(q, 0x431000a0, 1u << (which ? 21 : 5));
+        }
+        bool write = which != 2;
+        qtest_writel(q, DMA + 8, 1 | (write ? 1 << 1 : 0) |
+                                 (2 << 3) | (2 << 5) |
+                                 (write ? 2 << 10 : 2 << 8) | (5u << 28));
+        descriptor(q, 2, write ? RAM : 0x42002800,
+                   write ? 0x42002800 : RAM, 4);
+        qtest_clock_step(q, 1000000);
+        qtest_quit(q);
+        return;
+    }
+    g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
+    g_test_trap_assert_failed();
+    g_test_trap_assert_stderr("*VenusA unsupported *address=0x42002800*");
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -405,11 +784,28 @@ int main(int argc, char **argv)
     g_assert_cmpint(fd, >=, 0); close(fd);
     g_setenv("LISEM_QEMU_RGB_CAPTURE", capture_path, true);
     qtest_add_func("venusa/dma2d/normal-shadow", normal_shadow);
+    qtest_add_func("venusa/dma2d/m2m-yuyv-to-bgr", dma2d_m2m_yuyv_to_bgr);
+    for (unsigned i = 0; i < G_N_ELEMENTS(converter_rejected); i++) {
+        g_autofree char *name = g_strdup_printf("venusa/dma2d/converter-reject/%s",
+                                                converter_rejected[i].name);
+        qtest_add_data_func(name, &converter_rejected[i], reject_converter);
+    }
+    qtest_add_func("venusa/dma2d/jpeg-waits", jpeg_waits_for_pixels);
+    qtest_add_func("venusa/dma2d/jpeg-encode-waits", jpeg_encode_waits);
+    for (unsigned i = 0; i < 3; i++) {
+        g_autofree char *name = g_strdup_printf("venusa/image/jpeg-reject-route-%u", i);
+        qtest_add_data_func(name, GUINT_TO_POINTER(i), jpeg_reject_route);
+    }
     qtest_add_func("venusa/dma2d/clock-cancel-reset", cancel_gate);
     qtest_add_func("venusa/dma2d/shadow-irq-byte-lanes", shadow_irq_and_byte_lanes);
     qtest_add_func("venusa/dma2d/narrow-address-modes", narrow_and_address_modes);
     qtest_add_func("venusa/dma2d/priority-burst-order", priority_burst_order);
     qtest_add_func("venusa/dma2d/psram-alias", psram_alias);
+    qtest_add_func("venusa/dma2d/mixed-width-copy", mixed_width_copy);
+    qtest_add_func("venusa/dma2d/strided-copy", strided_copy);
+    qtest_add_func("venusa/dma2d/strided-shadow-clock-cancel", strided_shadow_clock_cancel);
+    qtest_add_func("venusa/dma2d/mixed-width-matrix", mixed_width_matrix);
+    qtest_add_func("venusa/dma2d/alias-overlap-order", alias_overlap_order);
     qtest_add_func("venusa/rgb/format-capacity-soft-reset", rgb_format_capacity);
     qtest_add_func("venusa/rgb/actual-pixels", rgb_pixels);
     qtest_add_func("venusa/rgb/starvation-no-frame", starvation_no_frame);
@@ -421,6 +817,10 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < G_N_ELEMENTS(rejected); i++) {
         g_autofree char *name = g_strdup_printf("venusa/image/reject/%s", rejected[i].name);
         qtest_add_data_func(name, &rejected[i], reject);
+    }
+    for (unsigned i = 0; i < G_N_ELEMENTS(normal_rejected); i++) {
+        g_autofree char *name = g_strdup_printf("venusa/dma2d/reject/%s", normal_rejected[i].name);
+        qtest_add_data_func(name, &normal_rejected[i], reject_normal);
     }
     int result = g_test_run();
     unlink(flash); unlink(capture_path); g_free(flash); g_free(capture_path);
