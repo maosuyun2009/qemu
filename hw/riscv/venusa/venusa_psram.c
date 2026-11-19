@@ -25,7 +25,8 @@ void venusa_psram_init(VenusASoC *s)
     uint8_t modes[10] = {
         0x09, 0x8d, 0x93, 0xa0, 0x40, 0, 0, 0, 0x05, 0x01,
     };
-    modes[2] = s->psram_bytes == 8 * MiB ? 0x93 : 0xdd;
+    modes[2] = s->psram_bytes == 4 * MiB ? 0x89 :
+               s->psram_bytes == 8 * MiB ? 0x93 : 0xdd;
     listenai_xccela_init(&s->psram_chip, OBJECT(s), "venusa-sip-psram",
                         s->psram_bytes, modes);
     s->psram_chip.mode_read_pairs = true;

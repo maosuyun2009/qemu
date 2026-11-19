@@ -332,6 +332,33 @@ static void psram(const void *opaque)
     qtest_quit(q);
 }
 
+static void psram_4mib(const void *opaque)
+{
+    (void)opaque;
+    QTestState *q = start_options(false,
+        "-global venusa-soc.psram-bytes=4194304");
+    static const uint32_t addresses[] = {
+        0x38000000, 0x383ffffc,
+    };
+
+    for (unsigned i = 0; i < G_N_ELEMENTS(addresses); i++) {
+        qtest_writel(q, addresses[i], 0x43210000 + i);
+    }
+    for (unsigned i = 0; i < G_N_ELEMENTS(addresses); i++) {
+        g_assert_cmphex(qtest_readl(q, addresses[i]), ==, 0x43210000 + i);
+    }
+    /* MR2 density=1, device ID=1, including paired MR1/MR2 reads. */
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x804), ==, 0x898d);
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x808), ==, 0xa089);
+    qtest_system_reset(q);
+    for (unsigned i = 0; i < G_N_ELEMENTS(addresses); i++) {
+        g_assert_cmphex(qtest_readl(q, addresses[i]), ==, 0x43210000 + i);
+    }
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x800), ==, 0x8d09);
+    g_assert_cmphex(qtest_readl(q, PSRAM_CTRL + 0x808), ==, 0xa089);
+    qtest_quit(q);
+}
+
 static void psram_16mib(void)
 {
     QTestState *q = start_options(false,
@@ -375,7 +402,7 @@ static void psram_invalid_size(const void *opaque)
     g_test_trap_subprocess(NULL, 5 * G_USEC_PER_SEC, 0);
     g_test_trap_assert_failed();
     g_test_trap_assert_stderr("*VenusA psram-bytes must be "
-                             "8388608 or 16777216*");
+                             "4194304, 8388608 or 16777216*");
 }
 
 static uint32_t command(QTestState *q, unsigned index, uint32_t argument,
@@ -862,12 +889,14 @@ int main(int argc, char **argv)
     }
     qtest_add_func("venusa/systimer", systimer);
     qtest_add_data_func("venusa/psram", "", psram);
+    qtest_add_data_func("venusa/psram-4mib",
+                        "-global venusa-soc.psram-bytes=4194304", psram_4mib);
     qtest_add_data_func("venusa/psram-8mib",
                         "-global venusa-soc.psram-bytes=8388608", psram);
     qtest_add_func("venusa/psram-16mib", psram_16mib);
     static const unsigned invalid_psram_bytes[] = {
-        0, 1, 4194304, 8388607, 8388609, 16777215, 16777217,
-        33554432, UINT32_MAX,
+        0, 1, 4194303, 4194305, 8388607, 8388609, 16777215,
+        16777217, 33554432, UINT32_MAX,
     };
     for (unsigned i = 0; i < G_N_ELEMENTS(invalid_psram_bytes); i++) {
         g_autofree char *name = g_strdup_printf("venusa/psram-invalid-size/%u",
