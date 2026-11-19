@@ -192,6 +192,16 @@ static void venusa_board_init(MachineState *machine)
     b->nor_bytes[0] = LISTENAI_NOR_SIZE;
     const char *path = getenv("LISEM_QEMU_BOARD");
     if (path) { listenai_board_load(b, path, "venusa", 32, 22); }
+    const char *flash_bytes = getenv("LISEM_QEMU_FLASH_BYTES");
+    if (flash_bytes) {
+        char *end = NULL;
+        unsigned long long bytes = g_ascii_strtoull(flash_bytes, &end, 0);
+        if (end == flash_bytes || *end != '\0' || !bytes || bytes > UINT32_MAX) {
+            error_report("Invalid LISEM_QEMU_FLASH_BYTES: %s", flash_bytes);
+            exit(1);
+        }
+        b->nor_bytes[0] = (uint32_t)bytes;
+    }
     if (b->lcd_qspi) {
         error_report("QSPI display routing is unavailable on VenusA"); exit(1);
     }
